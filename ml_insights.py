@@ -6,6 +6,7 @@ import matplotlib
 matplotlib.use("Agg")
 import requests
 import json
+import hmac
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -31,6 +32,8 @@ st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide"
 
 HUB_FILE = Path("hub_dados.parquet")
 HUB_KEY_FILE = Path("hub_key.txt")
+DEFAULT_APP_PASSWORD = "mlhub123"
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD))
 
 # Detecta se está rodando na nuvem (Streamlit Cloud) ou local
 IS_CLOUD = not HUB_FILE.parent.exists() or os.environ.get("STREAMLIT_SERVER_HEADLESS") == "1"
@@ -64,10 +67,36 @@ def hub_para_bytes(df):
     buf.seek(0)
     return buf.read()
 
+
+def require_authentication():
+    if st.session_state.get("auth_ok", False):
+        return
+
+    st.title("Acesso protegido")
+    st.write("Digite a senha para entrar no painel.")
+    senha = st.text_input("Senha", type="password")
+
+    if st.button("Entrar", type="primary"):
+        if hmac.compare_digest(senha, APP_PASSWORD):
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+
+    st.info("Dica: no Streamlit Cloud, defina APP_PASSWORD em Settings > Secrets.")
+    st.stop()
+
+
+require_authentication()
+
 st.title("ML Insights Hub")
 st.markdown(
     "Recebe planilhas em formatos diferentes, organiza automaticamente e treina modelos de ML."
 )
+
+if st.sidebar.button("Sair"):
+    st.session_state.auth_ok = False
+    st.rerun()
 
 
 SYNONYMS = {
