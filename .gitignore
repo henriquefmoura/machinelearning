@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# Dados locais (não subir planilhas ao GitHub)
+*.xlsx
+*.xls
+*.csv
+hub_dados.parquet
+hub_key.txt
+
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Streamlit cache local
+.streamlit/secrets.toml
