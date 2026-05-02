@@ -38,6 +38,7 @@ st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide"
 
 HUB_FILE = Path("hub_dados.parquet")
 HUB_KEY_FILE = Path("hub_key.txt")
+RPA_LOG_FILE = Path("rpa_log.json")
 DEFAULT_APP_PASSWORD = "mlhub123"
 
 try:
@@ -79,6 +80,22 @@ def hub_para_bytes(df):
     df.to_parquet(buf, index=False)
     buf.seek(0)
     return buf.read()
+
+
+def salvar_rpa_log(runs):
+    try:
+        RPA_LOG_FILE.write_text(json.dumps(runs, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def carregar_rpa_log():
+    if RPA_LOG_FILE.exists():
+        try:
+            return json.loads(RPA_LOG_FILE.read_text())
+        except Exception:
+            pass
+    return []
 
 
 def build_demo_hub():
@@ -375,6 +392,8 @@ if "rpa_panel_open" not in st.session_state:
     st.session_state.rpa_panel_open = False
 if "rpa_last_run" not in st.session_state:
     st.session_state.rpa_last_run = None
+if "rpa_runs" not in st.session_state:
+    st.session_state.rpa_runs = carregar_rpa_log()
 if "hub_df" not in st.session_state:
     _df_disk, _key_disk = carregar_hub()
     st.session_state.hub_df = _df_disk
@@ -482,7 +501,7 @@ if uploaded_files:
         processed_count = sum(1 for d in run_details if d["status"] == "processado")
         ignored_count = sum(1 for d in run_details if d["status"] == "ignorado")
         rows_after = len(hub)
-        st.session_state.rpa_last_run = {
+        _run_entry = {
             "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
             "versao": f"RPA-{datetime.now().strftime('%Y.%m.%d.%H%M')}",
             "chave": key_col,
@@ -494,6 +513,9 @@ if uploaded_files:
             "delta_linhas": int(rows_after - rows_before),
             "detalhes": run_details,
         }
+        st.session_state.rpa_last_run = _run_entry
+        st.session_state.rpa_runs.append(_run_entry)
+        salvar_rpa_log(st.session_state.rpa_runs)
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
         st.success(f"✅ Dados consolidados com sucesso — {ts}")
         st.rerun()
@@ -574,8 +596,9 @@ st.caption(
 if st.session_state.get("rpa_panel_open", False):
     try:
         st.markdown("---")
-        st.markdown("### 🤖 Painel RPA — Ultima Execucao")
+        st.markdown("### 🤖 Painel RPA")
         rpa = st.session_state.get("rpa_last_run")
+        runs_hist = st.session_state.get("rpa_runs", [])
         if not rpa:
             st.info(
                 "Nenhuma execucao registrada ainda.\n"
@@ -583,18 +606,47 @@ if st.session_state.get("rpa_panel_open", False):
                 "para que o RPA registre o historico aqui."
             )
         else:
-            r1, r2, r3, r4 = st.columns(4)
+            st.caption(f"Ultima execucao: {rpa['timestamp']}")
+            r1, r2, r3, r4, r5 = st.columns(5)
             r1.metric("Versao", rpa["versao"])
             r2.metric("Arquivos OK", f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}")
-            r3.metric("Novos registros", f"{rpa['delta_linhas']:+,}")
-            r4.metric("Chave usada", rpa["chave"])
-            st.caption(f"Executado em: {rpa['timestamp']}")
+            r3.metric("Ignorados", rpa["arquivos_ignorados"])
+            r4.metric("Novos registros", f"{rpa['delta_linhas']:+,}")
+            r5.metric("Chave usada", rpa["chave"])
             st.markdown(
                 f"- Registros antes: **{rpa['linhas_antes']:,}** → depois: **{rpa['linhas_depois']:,}**\n"
                 f"- Arquivos ignorados: **{rpa['arquivos_ignorados']}** (chave nao encontrada)\n"
                 "- Status: ✅ concluido"
             )
-            st.dataframe(pd.DataFrame(rpa["detalhes"]), use_container_width=True)
+            with st.expander("Detalhes por arquivo"):
+                st.dataframe(pd.DataFrame(rpa["detalhes"]), use_container_width=True)
+            st.download_button(
+                label="⬇ Baixar log desta execucao (JSON)",
+                data=json.dumps(rpa, ensure_ascii=False, indent=2),
+                file_name=f"rpa_{rpa['versao']}.json",
+                mime="application/json",
+            )
+        if len(runs_hist) > 1:
+            st.markdown("#### Historico de execucoes")
+            hist_rows = [
+                {
+                    "timestamp": r["timestamp"],
+                    "versao": r["versao"],
+                    "arquivos_processados": r["arquivos_processados"],
+                    "arquivos_ignorados": r["arquivos_ignorados"],
+                    "delta_linhas": r["delta_linhas"],
+                    "chave": r["chave"],
+                }
+                for r in reversed(runs_hist)
+            ]
+            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True)
+            st.download_button(
+                label="⬇ Baixar historico completo (JSON)",
+                data=json.dumps(runs_hist, ensure_ascii=False, indent=2),
+                file_name="rpa_historico.json",
+                mime="application/json",
+                key="dl_hist",
+            )
         st.markdown("---")
     except Exception as _rpa_err:
         st.warning(f"Painel RPA indisponivel: {_rpa_err}")
