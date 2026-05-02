@@ -349,6 +349,14 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True,
 )
 
+if "rpa_panel_open" not in st.session_state:
+    st.session_state.rpa_panel_open = False
+if "rpa_last_run" not in st.session_state:
+    st.session_state.rpa_last_run = None
+
+if st.sidebar.button("Versao RPA"):
+    st.session_state.rpa_panel_open = not st.session_state.rpa_panel_open
+
 if "hub_df" not in st.session_state:
     _df_disk, _key_disk = carregar_hub()
     st.session_state.hub_df = _df_disk
@@ -394,6 +402,8 @@ if uploaded_files:
     ingest_now = st.sidebar.button("Ingerir no Hub", type="primary")
     if ingest_now:
         hub = st.session_state.hub_df.copy()
+        rows_before = len(hub)
+        run_details = []
         for f in uploaded_files:
             if f.name.lower().endswith(".csv"):
                 raw = pd.read_csv(f)
@@ -402,10 +412,29 @@ if uploaded_files:
             clean, original_cols, final_cols = preprocess_df(raw)
             if key_col not in clean.columns:
                 st.warning(f"Arquivo {f.name} ignorado: chave {key_col} nao encontrada.")
+                run_details.append(
+                    {
+                        "arquivo": f.name,
+                        "status": "ignorado",
+                        "linhas_lidas": int(len(raw)),
+                        "linhas_validas": 0,
+                        "colunas": int(raw.shape[1]),
+                    }
+                )
                 continue
 
             clean = clean.dropna(subset=[key_col]).drop_duplicates(subset=[key_col], keep="last")
+            linhas_validas = int(len(clean))
             hub = upsert_hub(hub, clean, key_col)
+            run_details.append(
+                {
+                    "arquivo": f.name,
+                    "status": "processado",
+                    "linhas_lidas": int(len(raw)),
+                    "linhas_validas": linhas_validas,
+                    "colunas": int(clean.shape[1]),
+                }
+            )
 
             with st.expander(f"Mapeamento automatico: {f.name}"):
                 st.write(pd.DataFrame({"original": original_cols, "padrao": final_cols}))
@@ -413,6 +442,21 @@ if uploaded_files:
         st.session_state.hub_df = hub
         st.session_state.hub_key = key_col
         salvar_hub(hub, key_col)
+        processed_count = sum(1 for d in run_details if d["status"] == "processado")
+        ignored_count = sum(1 for d in run_details if d["status"] == "ignorado")
+        rows_after = len(hub)
+        st.session_state.rpa_last_run = {
+            "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "versao": f"RPA-{datetime.now().strftime('%Y.%m.%d.%H%M')}",
+            "chave": key_col,
+            "arquivos_recebidos": len(uploaded_files),
+            "arquivos_processados": processed_count,
+            "arquivos_ignorados": ignored_count,
+            "linhas_antes": int(rows_before),
+            "linhas_depois": int(rows_after),
+            "delta_linhas": int(rows_after - rows_before),
+            "detalhes": run_details,
+        }
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
         st.success(f"Dados consolidados e salvos em disco — {ts}")
         st.rerun()
@@ -463,6 +507,34 @@ cat_cols = [c for c in df.columns if c not in numeric_cols and df[c].nunique() <
 
 st.markdown("## Dashboard Executivo")
 st.caption("Painel fixo com visão de negócio e exploração rápida dos dados consolidados.")
+
+if st.session_state.rpa_panel_open:
+    st.markdown("### Versao RPA")
+    rpa = st.session_state.rpa_last_run
+    if not rpa:
+        st.info(
+            "Nenhuma execução RPA registrada ainda. Envie planilhas e clique em Ingerir no Hub para preencher esta area."
+        )
+    else:
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Versao", rpa["versao"])
+        r2.metric("Arquivos processados", f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}")
+        r3.metric("Delta de linhas", f"{rpa['delta_linhas']:+,}")
+        r4.metric("Chave de consolidacao", rpa["chave"])
+
+        st.caption(f"Ultima execução: {rpa['timestamp']}")
+        st.markdown("**Itens trazidos pelo RPA**")
+        st.markdown(
+            "\n".join(
+                [
+                    f"- Arquivos ignorados: {rpa['arquivos_ignorados']}",
+                    f"- Registros antes/depois: {rpa['linhas_antes']} -> {rpa['linhas_depois']}",
+                    "- Status da execução: concluida",
+                ]
+            )
+        )
+
+        st.dataframe(pd.DataFrame(rpa["detalhes"]), width="stretch")
 
 missing_total = int(df.isnull().sum().sum())
 missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
