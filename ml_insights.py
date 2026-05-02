@@ -68,6 +68,42 @@ def hub_para_bytes(df):
     return buf.read()
 
 
+def build_demo_hub():
+    return pd.DataFrame(
+        {
+            "id_cliente": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+            "nome": [
+                "Cliente A",
+                "Cliente B",
+                "Cliente C",
+                "Cliente D",
+                "Cliente E",
+                "Cliente F",
+                "Cliente G",
+                "Cliente H",
+                "Cliente I",
+                "Cliente J",
+            ],
+            "preco": [120, 240, 180, 320, 280, 150, 350, 210, 260, 190],
+            "complexidade": [1, 2, 1, 3, 2, 1, 3, 2, 2, 1],
+            "canal_digital": [0, 1, 1, 1, 0, 0, 1, 1, 0, 1],
+            "contratou": [0, 1, 0, 1, 1, 0, 1, 1, 0, 1],
+            "cidade": [
+                "Sao Paulo",
+                "Campinas",
+                "Sao Paulo",
+                "Rio de Janeiro",
+                "Curitiba",
+                "Santos",
+                "Belo Horizonte",
+                "Campinas",
+                "Recife",
+                "Porto Alegre",
+            ],
+        }
+    )
+
+
 def require_authentication():
     if st.session_state.get("auth_ok", False):
         return
@@ -388,19 +424,20 @@ if st.sidebar.button("Limpar Hub"):
         HUB_KEY_FILE.unlink()
 
 df = st.session_state.hub_df.copy()
+is_demo_mode = False
 
 if df.empty:
-    st.info("Envie uma ou mais planilhas e clique em Ingerir no Hub.")
-    st.markdown(
-        """
-        O app aceita cargas completas e parciais. Se chegar um novo arquivo com o mesmo ID,
-        os campos novos atualizam o cadastro existente automaticamente.
-        """
-    )
-    st.stop()
+    df = build_demo_hub()
+    is_demo_mode = True
 
 st.sidebar.success(f"Hub ativo: {len(df)} clientes")
 st.sidebar.markdown(f"Colunas consolidadas: {df.shape[1]}")
+
+if is_demo_mode:
+    st.info(
+        "Modo demonstracao ativo: exibindo dashboard com dados exemplo. "
+        "Para usar seus dados reais, envie planilhas na barra lateral e clique em Ingerir no Hub."
+    )
 
 # ─────────────────────────────────────────────
 # 3. VISÃO GERAL DOS DADOS
@@ -418,35 +455,63 @@ with st.expander("Visao geral do hub", expanded=True):
     st.dataframe(desc, width="stretch")
 
 # ─────────────────────────────────────────────
-# DASHBOARD DE VALOR — gráficos automáticos
+# DASHBOARD FIXO — experiência executiva
 # ─────────────────────────────────────────────
-with st.expander("📊 Dashboard de Dados", expanded=True):
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-    cat_cols = [c for c in df.columns if c not in numeric_cols and df[c].nunique() <= 30]
+numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+cat_cols = [c for c in df.columns if c not in numeric_cols and df[c].nunique() <= 30]
 
-    # ── KPIs principais ──────────────────────────────────────────
-    st.markdown("#### Indicadores Gerais")
-    kpi_cols = numeric_cols[:6]
-    if kpi_cols:
-        ks = st.columns(len(kpi_cols))
+st.markdown("## Dashboard Executivo")
+st.caption("Painel fixo com visão de negócio e exploração rápida dos dados consolidados.")
+
+missing_total = int(df.isnull().sum().sum())
+missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
+
+kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
+kpi_1.metric("Clientes", f"{df.shape[0]:,}")
+kpi_2.metric("Atributos", f"{df.shape[1]:,}")
+kpi_3.metric("Valores ausentes", f"{missing_total:,}")
+kpi_4.metric("Qualidade preenchimento", f"{100 - missing_pct:.1f}%")
+
+tab_overview, tab_profile, tab_rel, tab_export = st.tabs([
+    "Visão Geral",
+    "Perfil dos Dados",
+    "Relações e Tendências",
+    "Exportação",
+])
+
+with tab_overview:
+    left, right = st.columns([1.4, 1])
+    with left:
+        st.markdown("### Amostra do Hub")
+        st.dataframe(df.head(15), width="stretch")
+    with right:
+        st.markdown("### Estatísticas rápidas")
+        if numeric_cols:
+            summary = df[numeric_cols].describe().T[["mean", "std", "min", "max"]].round(2)
+            st.dataframe(summary, width="stretch")
+        else:
+            st.info("Nenhuma coluna numérica encontrada para estatísticas.")
+
+    if numeric_cols:
+        st.markdown("### Indicadores por variável")
+        kpi_cols = numeric_cols[:6]
+        kpi_grid = st.columns(len(kpi_cols))
         for i, c in enumerate(kpi_cols):
             total = df[c].sum()
             media = df[c].mean()
-            ks[i].metric(
+            kpi_grid[i].metric(
                 label=c.replace("_", " ").title(),
                 value=f"{media:,.2f}",
                 delta=f"total {total:,.0f}",
             )
 
-    st.markdown("---")
-
-    # ── Distribuição de variáveis numéricas ──────────────────────
+with tab_profile:
     if numeric_cols:
-        st.markdown("#### Distribuição das Variáveis Numéricas")
+        st.markdown("### Distribuição das variáveis numéricas")
         n = len(numeric_cols)
         ncols = min(3, n)
         nrows = (n + ncols - 1) // ncols
-        fig_dist, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows))
+        fig_dist, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.4 * nrows))
         axes = np.array(axes).flatten() if n > 1 else [axes]
         for i, c in enumerate(numeric_cols):
             axes[i].hist(df[c].dropna(), bins=20, color="#4e8cff", edgecolor="white", alpha=0.85)
@@ -458,23 +523,26 @@ with st.expander("📊 Dashboard de Dados", expanded=True):
         st.pyplot(fig_dist)
         plt.close()
 
-    # ── Contagem de categorias ────────────────────────────────────
     if cat_cols:
-        st.markdown("#### Distribuição das Categorias")
-        for c in cat_cols[:4]:
-            vcounts = df[c].value_counts().head(15)
-            fig_cat, ax_cat = plt.subplots(figsize=(8, 3))
+        st.markdown("### Distribuição das categorias")
+        ccol1, ccol2 = st.columns(2)
+        for idx, c in enumerate(cat_cols[:6]):
+            vcounts = df[c].value_counts().head(12)
+            fig_cat, ax_cat = plt.subplots(figsize=(7, 3.2))
             ax_cat.barh(vcounts.index.astype(str), vcounts.values, color="#2ecc71", edgecolor="white")
             ax_cat.set_title(c.replace("_", " ").title(), fontsize=10)
             ax_cat.set_xlabel("Qtd.")
             ax_cat.invert_yaxis()
             fig_cat.tight_layout()
-            st.pyplot(fig_cat)
+            if idx % 2 == 0:
+                ccol1.pyplot(fig_cat)
+            else:
+                ccol2.pyplot(fig_cat)
             plt.close()
 
-    # ── Mapa de correlação ────────────────────────────────────────
+with tab_rel:
     if len(numeric_cols) >= 2:
-        st.markdown("#### Mapa de Correlação")
+        st.markdown("### Mapa de correlação")
         corr = df[numeric_cols].corr(numeric_only=True)
         fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(numeric_cols)), max(5, len(numeric_cols) - 1)))
         cax = ax_corr.matshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
@@ -490,14 +558,13 @@ with st.expander("📊 Dashboard de Dados", expanded=True):
         st.pyplot(fig_corr)
         plt.close()
 
-    # ── Scatter comparativo entre pares ──────────────────────────
-    if len(numeric_cols) >= 2:
-        st.markdown("#### Relação entre Variáveis")
-        col_x = st.selectbox("Eixo X", numeric_cols, index=0, key="dash_x")
-        col_y = st.selectbox("Eixo Y", numeric_cols, index=min(1, len(numeric_cols)-1), key="dash_y")
-        color_by = st.selectbox("Colorir por (opcional)", ["Nenhum"] + cat_cols, key="dash_color")
+        st.markdown("### Relação entre variáveis")
+        rel1, rel2, rel3 = st.columns(3)
+        col_x = rel1.selectbox("Eixo X", numeric_cols, index=0, key="dash_x")
+        col_y = rel2.selectbox("Eixo Y", numeric_cols, index=min(1, len(numeric_cols) - 1), key="dash_y")
+        color_by = rel3.selectbox("Colorir por", ["Nenhum"] + cat_cols, key="dash_color")
 
-        fig_sc, ax_sc = plt.subplots(figsize=(8, 5))
+        fig_sc, ax_sc = plt.subplots(figsize=(8.6, 4.8))
         if color_by != "Nenhum":
             for grupo, sub in df.groupby(color_by):
                 ax_sc.scatter(sub[col_x], sub[col_y], label=str(grupo), alpha=0.7, s=40)
@@ -510,12 +577,11 @@ with st.expander("📊 Dashboard de Dados", expanded=True):
         st.pyplot(fig_sc)
         plt.close()
 
-    # ── Evolução temporal (se houver coluna de data) ──────────────
     date_cols = [c for c in df.columns if "data" in c.lower() or "date" in c.lower() or "mes" in c.lower()]
     if date_cols and numeric_cols:
-        st.markdown("#### Evolução Temporal")
+        st.markdown("### Evolução temporal")
         dcol = date_cols[0]
-        vcol = st.selectbox("Variável", numeric_cols, key="ts_var")
+        vcol = st.selectbox("Variável temporal", numeric_cols, key="ts_var")
         try:
             df_ts = df[[dcol, vcol]].dropna().copy()
             df_ts[dcol] = pd.to_datetime(df_ts[dcol], dayfirst=True, errors="coerce")
@@ -530,21 +596,29 @@ with st.expander("📊 Dashboard de Dados", expanded=True):
             st.pyplot(fig_ts)
             plt.close()
         except Exception:
-            st.info("Coluna de data encontrada, mas não foi possível parsear.")
+            st.info("Coluna de data encontrada, mas não foi possível interpretar os valores.")
 
-    # ── Exportar dados consolidados ───────────────────────────────
-    st.markdown("---")
-    st.markdown("#### Exportar Hub Consolidado")
-    import io
+with tab_export:
+    st.markdown("### Exportar base consolidada")
+    st.write("Baixe a base tratada para usar em outros ambientes ou restaurar no hub.")
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Hub")
     buf.seek(0)
-    st.download_button(
-        "⬇️ Baixar Excel consolidado",
+
+    exp1, exp2 = st.columns(2)
+    exp1.download_button(
+        "Baixar Excel consolidado",
         data=buf,
         file_name="hub_clientes.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    exp2.download_button(
+        "Baixar Parquet consolidado",
+        data=hub_para_bytes(df),
+        file_name="hub_dados.parquet",
+        mime="application/octet-stream",
     )
 
 with st.expander("Assistente IA para Insights", expanded=False):
