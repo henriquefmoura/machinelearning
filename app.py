@@ -1,15 +1,6 @@
-import traceback
+import runpy
+import os
 
-import streamlit as st
-
-
-# Entry point unico: executa o app principal em ml_insights.
-# Se houver erro de import/runtime, mostra traceback na tela para facilitar diagnostico no Cloud.
-try:
-    import ml_insights  # noqa: F401
-except Exception as exc:
-    st.set_page_config(page_title="ML Insights Hub - erro", page_icon="⚠️", layout="centered")
-    st.title("⚠️ Falha ao iniciar o app")
-    st.error("Nao foi possivel carregar ml_insights.py")
-    st.exception(exc)
-    st.code(traceback.format_exc())
+# Executa ml_insights.py como script principal (evita cache de sys.modules entre reruns)
+_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml_insights.py")
+runpy.run_path(_script, run_name="__main__")
