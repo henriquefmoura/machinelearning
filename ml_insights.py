@@ -415,6 +415,7 @@ if uploaded_files:
         salvar_hub(hub, key_col)
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
         st.success(f"Dados consolidados e salvos em disco — {ts}")
+        st.rerun()
 
 if st.sidebar.button("Limpar Hub"):
     st.session_state.hub_df = pd.DataFrame()
