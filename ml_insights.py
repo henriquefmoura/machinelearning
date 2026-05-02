@@ -1,3 +1,6 @@
+import sys
+import traceback as _traceback
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,6 +10,9 @@ import matplotlib.pyplot as plt
 import requests
 import json
 import hmac
+
+# Log de diagnóstico — aparece em Streamlit Cloud > Manage app > Logs
+print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -135,7 +141,12 @@ def require_authentication():
     st.stop()
 
 
-require_authentication()
+try:
+    require_authentication()
+except Exception as _auth_err:
+    st.error(f"Erro na autenticacao: {_auth_err}")
+    st.code(_traceback.format_exc())
+    st.stop()
 
 # ── Cabecalho principal ───────────────────────────────────────
 col_hdr, col_sair = st.columns([5, 1])

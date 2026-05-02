@@ -1,6 +1,7 @@
+# rebuild-v4 - numpy pinado exato para garantir compatibilidade Cloud
 streamlit>=1.35.0,<2.0.0
 pandas>=2.0.0,<3.0.0
-numpy>=1.24.0,<2.0.0
+numpy==1.26.4
 scikit-learn>=1.5.0,<2.0.0
 matplotlib>=3.7.0,<4.0.0
 openpyxl>=3.1.0,<4.0.0
