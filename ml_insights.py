@@ -493,11 +493,11 @@ with st.expander("Visao geral do hub", expanded=True):
     col2.metric("Colunas", df.shape[1])
     col3.metric("Valores ausentes", int(df.isnull().sum().sum()))
 
-    st.dataframe(df.head(10), width="stretch")
+    st.dataframe(df.head(10), use_container_width=True)
 
     st.markdown("Estatisticas descritivas")
     desc = df.describe(include="all").T
-    st.dataframe(desc, width="stretch")
+    st.dataframe(desc, use_container_width=True)
 
 # ─────────────────────────────────────────────
 # DASHBOARD FIXO — experiência executiva
@@ -508,33 +508,39 @@ cat_cols = [c for c in df.columns if c not in numeric_cols and df[c].nunique() <
 st.markdown("## Dashboard Executivo")
 st.caption("Painel fixo com visão de negócio e exploração rápida dos dados consolidados.")
 
-if st.session_state.rpa_panel_open:
-    st.markdown("### Versao RPA")
-    rpa = st.session_state.rpa_last_run
-    if not rpa:
-        st.info(
-            "Nenhuma execução RPA registrada ainda. Envie planilhas e clique em Ingerir no Hub para preencher esta area."
-        )
-    else:
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Versao", rpa["versao"])
-        r2.metric("Arquivos processados", f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}")
-        r3.metric("Delta de linhas", f"{rpa['delta_linhas']:+,}")
-        r4.metric("Chave de consolidacao", rpa["chave"])
-
-        st.caption(f"Ultima execução: {rpa['timestamp']}")
-        st.markdown("**Itens trazidos pelo RPA**")
-        st.markdown(
-            "\n".join(
-                [
-                    f"- Arquivos ignorados: {rpa['arquivos_ignorados']}",
-                    f"- Registros antes/depois: {rpa['linhas_antes']} -> {rpa['linhas_depois']}",
-                    "- Status da execução: concluida",
-                ]
+if st.session_state.get("rpa_panel_open", False):
+    try:
+        st.markdown("### Versao RPA")
+        rpa = st.session_state.get("rpa_last_run")
+        if not rpa:
+            st.info(
+                "Nenhuma execucao RPA registrada ainda. Envie planilhas e clique em "
+                "Ingerir no Hub para preencher esta area."
             )
-        )
+        else:
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Versao", rpa["versao"])
+            r2.metric(
+                "Arquivos processados",
+                f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}",
+            )
+            r3.metric("Delta de linhas", f"{rpa['delta_linhas']:+,}")
+            r4.metric("Chave", rpa["chave"])
 
-        st.dataframe(pd.DataFrame(rpa["detalhes"]), width="stretch")
+            st.caption(f"Ultima execucao: {rpa['timestamp']}")
+            st.markdown("**Itens trazidos pelo RPA**")
+            st.markdown(
+                "\n".join(
+                    [
+                        f"- Arquivos ignorados: {rpa['arquivos_ignorados']}",
+                        f"- Registros antes/depois: {rpa['linhas_antes']} -> {rpa['linhas_depois']}",
+                        "- Status: concluido",
+                    ]
+                )
+            )
+            st.dataframe(pd.DataFrame(rpa["detalhes"]), use_container_width=True)
+    except Exception as _rpa_err:
+        st.warning(f"Painel RPA indisponivel: {_rpa_err}")
 
 missing_total = int(df.isnull().sum().sum())
 missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
@@ -556,12 +562,12 @@ with tab_overview:
     left, right = st.columns([1.4, 1])
     with left:
         st.markdown("### Amostra do Hub")
-        st.dataframe(df.head(15), width="stretch")
+        st.dataframe(df.head(15), use_container_width=True)
     with right:
         st.markdown("### Estatísticas rápidas")
         if numeric_cols:
             summary = df[numeric_cols].describe().T[["mean", "std", "min", "max"]].round(2)
-            st.dataframe(summary, width="stretch")
+            st.dataframe(summary, use_container_width=True)
         else:
             st.info("Nenhuma coluna numérica encontrada para estatísticas.")
 
@@ -808,7 +814,7 @@ if tipo_problema == "Classificação (sim/não)":
     melhor_modelo = modelos[melhor_nome]
 
     st.subheader("Comparacao de modelos")
-    st.dataframe(df_res.style.format({"Acurácia (teste)": "{:.1%}", "Acurácia (cross-val)": "{:.1%}"}), width="stretch")
+    st.dataframe(df_res.style.format({"Acurácia (teste)": "{:.1%}", "Acurácia (cross-val)": "{:.1%}"}), use_container_width=True)
     st.success(f"✅ Melhor modelo: **{melhor_nome}** com **{df_res.iloc[0]['Acurácia (teste)']:.1%}** de acurácia")
 
     # Importância das variáveis
@@ -839,7 +845,7 @@ if tipo_problema == "Classificação (sim/não)":
     st.subheader("Ranking por probabilidade de contratar")
     st.dataframe(
         df_rank.style.format({"prob_contratar": "{:.1%}"}),
-        width="stretch"
+        use_container_width=True
     )
 
     # Previsão interativa
@@ -894,7 +900,7 @@ elif tipo_problema == "Regressão (valor numérico)":
     melhor_modelo = modelos[melhor_nome]
 
     st.subheader("Comparacao de modelos")
-    st.dataframe(df_res.style.format({"MAE (erro médio)": "{:.2f}", "R² (ajuste)": "{:.2f}"}), width="stretch")
+    st.dataframe(df_res.style.format({"MAE (erro médio)": "{:.2f}", "R² (ajuste)": "{:.2f}"}), use_container_width=True)
     st.success(f"✅ Melhor modelo: **{melhor_nome}** com R² = **{df_res.iloc[0]['R² (ajuste)']:.2f}**")
 
     if hasattr(melhor_modelo, "feature_importances_"):
@@ -931,7 +937,7 @@ elif tipo_problema == "Regressão (valor numérico)":
     df_rank.index += 1
 
     st.subheader(f"Ranking por {target_col} previsto")
-    st.dataframe(df_rank, width="stretch")
+    st.dataframe(df_rank, use_container_width=True)
 
 # ─────────────────────────────────────────────
 # 8. ANÁLISE — CLUSTERING
@@ -951,7 +957,7 @@ elif tipo_problema == "Clustering (agrupamento)":
 
     st.subheader("Perfil medio por grupo")
     perfil = df_cluster.groupby("Grupo")[features_selecionadas].mean().round(2)
-    st.dataframe(perfil, width="stretch")
+    st.dataframe(perfil, use_container_width=True)
 
     st.subheader("Tamanho dos grupos")
     tamanhos = df_cluster["Grupo"].value_counts().reset_index()
@@ -978,7 +984,7 @@ elif tipo_problema == "Clustering (agrupamento)":
         plt.close()
 
     st.subheader("Dados com grupos")
-    st.dataframe(df_cluster, width="stretch")
+    st.dataframe(df_cluster, use_container_width=True)
 
     st.markdown("---")
     st.markdown("Insight: use os perfis por grupo para definir estrategias comerciais diferentes.")
