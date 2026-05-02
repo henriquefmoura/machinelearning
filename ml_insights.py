@@ -33,10 +33,17 @@ st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide"
 HUB_FILE = Path("hub_dados.parquet")
 HUB_KEY_FILE = Path("hub_key.txt")
 DEFAULT_APP_PASSWORD = "mlhub123"
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD))
+
+try:
+    APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD))
+except Exception:
+    APP_PASSWORD = os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD)
 
 # Detecta se está rodando na nuvem (Streamlit Cloud) ou local
-IS_CLOUD = not HUB_FILE.parent.exists() or os.environ.get("STREAMLIT_SERVER_HEADLESS") == "1"
+try:
+    IS_CLOUD = os.environ.get("STREAMLIT_SERVER_HEADLESS") == "1"
+except Exception:
+    IS_CLOUD = False
 
 
 def salvar_hub(df, key):
