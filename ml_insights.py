@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import requests
 import json
 import hmac
+import csv
 
 # Log de diagnóstico — aparece em Streamlit Cloud > Manage app > Logs
 print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
@@ -32,7 +33,6 @@ import re
 import os
 import io
 from pathlib import Path
-from datetime import datetime
 
 def inject_custom_css():
     st.markdown("""
@@ -119,17 +119,6 @@ def inject_custom_css():
     }
     [data-testid="stFileUploader"]:hover { border-color: #4e8cff !important; }
 
-    /* RPA Status Badges */
-    .badge {
-        display: inline-flex; align-items: center; gap: 4px;
-        padding: 4px 12px; border-radius: 9999px;
-        font-size: 12px; font-weight: 600;
-    }
-    .badge-success { background: rgba(16,185,129,0.12); color: #10b981; }
-    .badge-error   { background: rgba(239,68,68,0.12);  color: #ef4444; }
-    .badge-warning { background: rgba(245,158,11,0.12); color: #f59e0b; }
-    .badge-info    { background: rgba(59,130,246,0.12); color: #3b82f6; }
-
     /* Dividers */
     hr { border-color: #2d3748 !important; }
 
@@ -145,7 +134,6 @@ inject_custom_css()
 
 HUB_FILE = Path("hub_dados.parquet")
 HUB_KEY_FILE = Path("hub_key.txt")
-RPA_LOG_FILE = Path("rpa_log.json")
 DEFAULT_APP_PASSWORD = "mlhub123"
 
 try:
@@ -187,22 +175,6 @@ def hub_para_bytes(df):
     df.to_parquet(buf, index=False)
     buf.seek(0)
     return buf.read()
-
-
-def salvar_rpa_log(runs):
-    try:
-        RPA_LOG_FILE.write_text(json.dumps(runs, ensure_ascii=False, indent=2))
-    except Exception:
-        pass
-
-
-def carregar_rpa_log():
-    if RPA_LOG_FILE.exists():
-        try:
-            return json.loads(RPA_LOG_FILE.read_text())
-        except Exception:
-            pass
-    return []
 
 
 def build_demo_hub():
@@ -361,6 +333,23 @@ def preprocess_df(raw_df):
         df[c] = coerce_numeric_series(df[c])
 
     return df, original_cols, final_cols
+
+
+def read_uploaded_file(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
+    name = uploaded_file.name.lower()
+
+    if name.endswith(".csv"):
+        text_sample = raw_bytes[:8192].decode("utf-8", errors="ignore")
+        try:
+            dialect = csv.Sniffer().sniff(text_sample, delimiters=[",", ";", "\t", "|"])
+            sep = dialect.delimiter
+        except Exception:
+            sep = ";" if text_sample.count(";") > text_sample.count(",") else ","
+
+        return pd.read_csv(io.BytesIO(raw_bytes), sep=sep)
+
+    return pd.read_excel(io.BytesIO(raw_bytes))
 
 
 def upsert_hub(base_df, new_df, key_col):
@@ -537,16 +526,12 @@ def ai_insights_openai(api_key, model_name, user_prompt, summary):
         return "Nao foi possivel extrair resposta textual da API."
 
 # ── Estado inicial ───────────────────────────────────────────
-if "rpa_panel_open" not in st.session_state:
-    st.session_state.rpa_panel_open = False
-if "rpa_last_run" not in st.session_state:
-    st.session_state.rpa_last_run = None
-if "rpa_runs" not in st.session_state:
-    st.session_state.rpa_runs = carregar_rpa_log()
 if "confirm_limpar" not in st.session_state:
     st.session_state.confirm_limpar = False
 if "upload_attempted" not in st.session_state:
     st.session_state.upload_attempted = False
+if "auto_run_ml" not in st.session_state:
+    st.session_state.auto_run_ml = False
 if "hub_df" not in st.session_state:
     _df_disk, _key_disk = carregar_hub()
     st.session_state.hub_df = _df_disk
@@ -570,9 +555,7 @@ _has_hub = not st.session_state.hub_df.empty
 
 if uploaded_files:
     try:
-        _first_buf = io.BytesIO(uploaded_files[0].getvalue())
-        _raw_prev = (pd.read_csv(_first_buf) if uploaded_files[0].name.lower().endswith(".csv")
-                     else pd.read_excel(_first_buf))
+        _raw_prev = read_uploaded_file(uploaded_files[0])
         _df_cfg, _, _ = preprocess_df(_raw_prev)
     except Exception:
         _df_cfg = st.session_state.hub_df.copy() if _has_hub else build_demo_hub()
@@ -639,7 +622,7 @@ st.sidebar.markdown("---")
 
 # ── Botão único ───────────────────────────────────────────────
 _can_analyze = (bool(uploaded_files) or _has_hub) and _cfg_has_columns
-rodar = False
+rodar = st.session_state.pop("auto_run_ml", False)
 
 analisar_tudo = st.sidebar.button(
     "▶ Analisar Tudo",
@@ -660,47 +643,43 @@ if analisar_tudo and uploaded_files:
     st.session_state.upload_attempted = True
     with st.spinner("⏳ Carregando e processando dados..."):
         hub = st.session_state.hub_df.copy()
-        rows_before = len(hub)
-        run_details = []
+        processed_count = 0
+        ignored_count = 0
         for f in uploaded_files:
             try:
-                _fbuf = io.BytesIO(f.getvalue())
-                raw = pd.read_csv(_fbuf) if f.name.lower().endswith(".csv") else pd.read_excel(_fbuf)
+                raw = read_uploaded_file(f)
             except Exception as _e:
                 st.sidebar.error(f"Erro ao ler {f.name}: {_e}")
                 continue
+
             clean, _, _ = preprocess_df(raw)
-            if key_col not in clean.columns:
-                run_details.append({"arquivo": f.name, "status": "ignorado",
-                                    "linhas_lidas": int(len(raw)), "linhas_validas": 0,
-                                    "colunas": int(raw.shape[1])})
+            if clean.empty:
+                ignored_count += 1
                 continue
-            clean = clean.dropna(subset=[key_col]).drop_duplicates(subset=[key_col], keep="last")
-            hub = upsert_hub(hub, clean, key_col)
-            run_details.append({"arquivo": f.name, "status": "processado",
-                                 "linhas_lidas": int(len(raw)), "linhas_validas": int(len(clean)),
-                                 "colunas": int(clean.shape[1])})
+
+            current_key = key_col if key_col in clean.columns else suggest_key_column(clean)
+
+            if current_key in clean.columns:
+                clean = clean.dropna(subset=[current_key])
+                valid_count = int(clean[current_key].notna().sum())
+                uniq_count = int(clean[current_key].nunique(dropna=True))
+                uniq_ratio = (uniq_count / max(1, valid_count)) if valid_count > 0 else 0
+                if valid_count > 0 and uniq_ratio >= 0.95:
+                    clean = clean.drop_duplicates(subset=[current_key], keep="last")
+                    hub = upsert_hub(hub, clean, current_key)
+                    st.session_state.hub_key = current_key
+                else:
+                    hub = pd.concat([hub, clean], ignore_index=True)
+                    hub = hub.drop_duplicates(keep="last")
+            else:
+                hub = pd.concat([hub, clean], ignore_index=True)
+                hub = hub.drop_duplicates(keep="last")
+
+            processed_count += 1
+
         rows_after = len(hub)
-        processed_count = sum(1 for d in run_details if d["status"] == "processado")
-        ignored_count = sum(1 for d in run_details if d["status"] == "ignorado")
         st.session_state.hub_df = hub
-        st.session_state.hub_key = key_col
-        salvar_hub(hub, key_col)
-        _run_entry = {
-            "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            "versao": f"RPA-{datetime.now().strftime('%Y.%m.%d.%H%M')}",
-            "chave": key_col,
-            "arquivos_recebidos": len(uploaded_files),
-            "arquivos_processados": processed_count,
-            "arquivos_ignorados": ignored_count,
-            "linhas_antes": int(rows_before),
-            "linhas_depois": int(rows_after),
-            "delta_linhas": int(rows_after - rows_before),
-            "detalhes": run_details,
-        }
-        st.session_state.rpa_last_run = _run_entry
-        st.session_state.rpa_runs.append(_run_entry)
-        salvar_rpa_log(st.session_state.rpa_runs)
+        salvar_hub(hub, st.session_state.get("hub_key", key_col))
     if processed_count == 0 or rows_after == 0:
         st.sidebar.error(
             "Nenhum registro válido foi consolidado. "
@@ -708,20 +687,11 @@ if analisar_tudo and uploaded_files:
         )
         rodar = False
     else:
-        st.sidebar.success(f"✅ {rows_after:,} registros prontos!")
-        # Re-detecta a partir dos dados reais após ingestão
-        _df_after = hub.copy()
-        _num_after = _df_after.select_dtypes(include=np.number).columns.tolist()
-        target_col = suggest_target(_df_after)
-        features_selecionadas = [c for c in _num_after if c != target_col]
-        tipo_problema = _detect_tipo(_df_after, target_col)
-        rodar = True
+        st.session_state.auto_run_ml = True
+        st.sidebar.success(f"✅ Dashboard atualizado com {rows_after:,} registros.")
+        st.rerun()
 elif analisar_tudo and _has_hub:
     rodar = True
-
-st.sidebar.markdown("---")
-if st.sidebar.button("📋 Painel RPA", use_container_width=True):
-    st.session_state.rpa_panel_open = not st.session_state.rpa_panel_open
 
 if st.sidebar.button("🗑 Limpar Hub", use_container_width=True):
     st.session_state.confirm_limpar = True
@@ -790,68 +760,6 @@ st.caption(
     "Visao completa dos dados consolidados no hub. "
     "Use as abas abaixo para navegar entre os paineis."
 )
-
-if st.session_state.get("rpa_panel_open", False):
-    try:
-        st.markdown("---")
-        st.markdown("### 🤖 Painel RPA")
-        rpa = st.session_state.get("rpa_last_run")
-        runs_hist = st.session_state.get("rpa_runs", [])
-        if not rpa:
-            st.info(
-                "Nenhuma execucao registrada ainda.\n"
-                "Envie planilhas na barra lateral e clique em **Consolidar no Hub** "
-                "para que o RPA registre o historico aqui."
-            )
-        else:
-            _hdr, _badge = st.columns([3, 1])
-            _hdr.caption(f"Ultima execucao: **{rpa['timestamp']}**")
-            _badge.markdown('<span class="badge badge-success">✅ Concluído</span>', unsafe_allow_html=True)
-            r1, r2, r3, r4, r5 = st.columns(5)
-            r1.metric("Versao", rpa["versao"])
-            r2.metric("Arquivos OK", f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}")
-            r3.metric("Ignorados", rpa["arquivos_ignorados"])
-            r4.metric("Novos registros", f"{rpa['delta_linhas']:+,}")
-            r5.metric("Chave usada", rpa["chave"])
-            _delta_color = "#10b981" if rpa['delta_linhas'] >= 0 else "#ef4444"
-            st.markdown(
-                f"- Registros antes: **{rpa['linhas_antes']:,}** → depois: "
-                f"<span style='color:{_delta_color};font-weight:600;'>{rpa['linhas_depois']:,}</span>\n"
-                f"- Arquivos ignorados: **{rpa['arquivos_ignorados']}** (chave nao encontrada)",
-                unsafe_allow_html=True
-            )
-            with st.expander("Detalhes por arquivo"):
-                st.dataframe(pd.DataFrame(rpa["detalhes"]), use_container_width=True)
-            st.download_button(
-                label="⬇ Baixar log desta execucao (JSON)",
-                data=json.dumps(rpa, ensure_ascii=False, indent=2),
-                file_name=f"rpa_{rpa['versao']}.json",
-                mime="application/json",
-            )
-        if len(runs_hist) > 1:
-            st.markdown("#### Historico de execucoes")
-            hist_rows = [
-                {
-                    "timestamp": r["timestamp"],
-                    "versao": r["versao"],
-                    "arquivos_processados": r["arquivos_processados"],
-                    "arquivos_ignorados": r["arquivos_ignorados"],
-                    "delta_linhas": r["delta_linhas"],
-                    "chave": r["chave"],
-                }
-                for r in reversed(runs_hist)
-            ]
-            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True)
-            st.download_button(
-                label="⬇ Baixar historico completo (JSON)",
-                data=json.dumps(runs_hist, ensure_ascii=False, indent=2),
-                file_name="rpa_historico.json",
-                mime="application/json",
-                key="dl_hist",
-            )
-        st.markdown("---")
-    except Exception as _rpa_err:
-        st.warning(f"Painel RPA indisponivel: {_rpa_err}")
 
 missing_total = int(df.isnull().sum().sum())
 missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
