@@ -518,121 +518,125 @@ if "hub_df" not in st.session_state:
 st.sidebar.markdown("## 📊 ML Insights Hub")
 st.sidebar.markdown("---")
 
-# Guia de status
-_hub_ok = not st.session_state.hub_df.empty
-_step1 = "✅" if _hub_ok else "⏳"
-_step2 = "✅" if _hub_ok else "⬜"
-_step3 = "⬜"
-st.sidebar.markdown(
-    f"""
-    <div style='font-size:12px;color:#a6a9b6;line-height:2;padding:8px 0;'>
-    {_step1} Passo 1 — Carregar e consolidar dados<br>
-    {_step2} Passo 2 — Configurar modelo ML<br>
-    {_step3} Passo 3 — Rodar análise
-    </div>""",
-    unsafe_allow_html=True,
-)
-st.sidebar.markdown("---")
-
-# PASSO 1
-st.sidebar.markdown("### 1️⃣ Carregar Dados")
-st.sidebar.caption("Envie suas planilhas (Excel ou CSV). Varios arquivos sao consolidados automaticamente.")
+# ── Upload ────────────────────────────────────────────────────
+st.sidebar.markdown("### 📁 Sua planilha")
 uploaded_files = st.sidebar.file_uploader(
-    "Planilhas (Excel / CSV)",
+    "Excel ou CSV",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    help="Arraste ou clique para selecionar. Formatos aceitos: .xlsx, .xls, .csv",
+    label_visibility="collapsed",
 )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔄 Restaurar Hub Salvo")
-st.sidebar.caption("Se voce ja exportou um hub_dados.parquet antes, importe aqui para continuar.")
-hub_restore = st.sidebar.file_uploader(
-    "Importar hub_dados.parquet",
-    type=["parquet"],
-    key="hub_restore",
-)
-if hub_restore is not None:
-    try:
-        _restored = pd.read_parquet(hub_restore)
-        st.session_state.hub_df = _restored
-        salvar_hub(_restored, st.session_state.get("hub_key", "id_cliente"))
-        st.sidebar.success(f"✅ {len(_restored)} registros restaurados!")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao restaurar: {e}")
-
-if not st.session_state.hub_df.empty:
-    st.sidebar.info(f"Hub ativo: {len(st.session_state.hub_df):,} registros | {st.session_state.hub_df.shape[1]} colunas")
-
-st.sidebar.markdown("---")
+# ── Config automática baseada no primeiro arquivo ou hub ──────
+_has_hub = not st.session_state.hub_df.empty
 
 if uploaded_files:
-    first = uploaded_files[0]
-    if first.name.lower().endswith(".csv"):
-        temp_df = pd.read_csv(first)
-    else:
-        temp_df = pd.read_excel(first)
-    temp_df, _, mapped = preprocess_df(temp_df)
+    try:
+        _first_buf = io.BytesIO(uploaded_files[0].getvalue())
+        _raw_prev = (pd.read_csv(_first_buf) if uploaded_files[0].name.lower().endswith(".csv")
+                     else pd.read_excel(_first_buf))
+        _df_cfg, _, _ = preprocess_df(_raw_prev)
+    except Exception:
+        _df_cfg = st.session_state.hub_df.copy() if _has_hub else build_demo_hub()
+elif _has_hub:
+    _df_cfg = st.session_state.hub_df.copy()
+else:
+    _df_cfg = build_demo_hub()
 
-    candidates = [c for c in temp_df.columns if "id" in c or c.endswith("_id")]
-    default_key = "id_cliente" if "id_cliente" in temp_df.columns else (candidates[0] if candidates else temp_df.columns[0])
+_num_cfg = _df_cfg.select_dtypes(include=np.number).columns.tolist()
+_all_cfg = _df_cfg.columns.tolist()
+_auto_target = suggest_target(_df_cfg)
+_cands_k = [c for c in _all_cfg if "id" in c.lower() or c.endswith("_id")]
+_auto_key = "id_cliente" if "id_cliente" in _all_cfg else (_cands_k[0] if _cands_k else _all_cfg[0])
 
-    st.sidebar.markdown("**Coluna de identificacao unica**")
-    st.sidebar.caption("Usada para evitar duplicatas ao consolidar arquivos diferentes.")
-    key_col = st.sidebar.selectbox(
-        "Chave do registro",
-        options=temp_df.columns.tolist(),
-        index=temp_df.columns.tolist().index(default_key),
-        help="Escolha a coluna que identifica unicamente cada cliente/registro.",
+def _detect_tipo(df_d, tgt):
+    if tgt not in df_d.columns:
+        return "Clustering (agrupamento)"
+    _col = df_d[tgt].dropna()
+    if _col.nunique() <= 2:
+        return "Classificacao (sim/nao)"
+    if pd.api.types.is_numeric_dtype(_col) and _col.nunique() > 10:
+        return "Regressao (valor numerico)"
+    if _col.nunique() <= 10:
+        return "Classificacao (sim/nao)"
+    return "Regressao (valor numerico)"
+
+_auto_tipo_str = _detect_tipo(_df_cfg, _auto_target)
+_tipo_opts = ["Classificacao (sim/nao)", "Regressao (valor numerico)", "Clustering (agrupamento)"]
+
+# ── Configurações avançadas (expander) ───────────────────────
+with st.sidebar.expander("⚙️ Configurações avançadas (opcional)"):
+    target_col = st.selectbox(
+        "Coluna alvo (o que prever)",
+        options=_all_cfg,
+        index=_all_cfg.index(_auto_target) if _auto_target in _all_cfg else 0,
+        help="Ex: contratou, valor, segmento.",
+    )
+    _feats_opts = [c for c in _num_cfg if c != target_col]
+    features_selecionadas = st.multiselect(
+        "Variáveis preditoras",
+        options=_feats_opts,
+        default=_feats_opts,
+        help="Colunas numéricas usadas no modelo.",
+    )
+    tipo_problema = st.radio(
+        "Tipo de análise",
+        _tipo_opts,
+        index=_tipo_opts.index(_auto_tipo_str),
+    )
+    key_col = st.selectbox(
+        "Chave única (evita duplicatas)",
+        options=_all_cfg,
+        index=_all_cfg.index(_auto_key) if _auto_key in _all_cfg else 0,
     )
 
-    st.sidebar.info("📂 Arquivo pronto. Clique em **▶ Consolidar no Hub** para carregar os dados.")
-    ingest_now = st.sidebar.button("▶ Consolidar no Hub", type="primary", use_container_width=True)
-    if ingest_now:
+st.sidebar.markdown("---")
+
+# ── Botão único ───────────────────────────────────────────────
+_can_analyze = bool(uploaded_files) or _has_hub
+rodar = False
+
+analisar_tudo = st.sidebar.button(
+    "▶ Analisar Tudo",
+    type="primary",
+    use_container_width=True,
+    disabled=not _can_analyze,
+)
+if not _can_analyze:
+    st.sidebar.caption("⬆️ Arraste sua planilha acima para começar")
+elif _has_hub and not uploaded_files:
+    st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
+
+# ── Lógica do botão ───────────────────────────────────────────
+if analisar_tudo and uploaded_files:
+    with st.spinner("⏳ Carregando e processando dados..."):
         hub = st.session_state.hub_df.copy()
         rows_before = len(hub)
         run_details = []
         for f in uploaded_files:
-            if f.name.lower().endswith(".csv"):
-                raw = pd.read_csv(f)
-            else:
-                raw = pd.read_excel(f)
-            clean, original_cols, final_cols = preprocess_df(raw)
-            if key_col not in clean.columns:
-                st.warning(f"Arquivo {f.name} ignorado: chave {key_col} nao encontrada.")
-                run_details.append(
-                    {
-                        "arquivo": f.name,
-                        "status": "ignorado",
-                        "linhas_lidas": int(len(raw)),
-                        "linhas_validas": 0,
-                        "colunas": int(raw.shape[1]),
-                    }
-                )
+            try:
+                _fbuf = io.BytesIO(f.getvalue())
+                raw = pd.read_csv(_fbuf) if f.name.lower().endswith(".csv") else pd.read_excel(_fbuf)
+            except Exception as _e:
+                st.sidebar.error(f"Erro ao ler {f.name}: {_e}")
                 continue
-
+            clean, _, _ = preprocess_df(raw)
+            if key_col not in clean.columns:
+                run_details.append({"arquivo": f.name, "status": "ignorado",
+                                    "linhas_lidas": int(len(raw)), "linhas_validas": 0,
+                                    "colunas": int(raw.shape[1])})
+                continue
             clean = clean.dropna(subset=[key_col]).drop_duplicates(subset=[key_col], keep="last")
-            linhas_validas = int(len(clean))
             hub = upsert_hub(hub, clean, key_col)
-            run_details.append(
-                {
-                    "arquivo": f.name,
-                    "status": "processado",
-                    "linhas_lidas": int(len(raw)),
-                    "linhas_validas": linhas_validas,
-                    "colunas": int(clean.shape[1]),
-                }
-            )
-
-            with st.expander(f"Mapeamento automatico: {f.name}"):
-                st.write(pd.DataFrame({"original": original_cols, "padrao": final_cols}))
-
+            run_details.append({"arquivo": f.name, "status": "processado",
+                                 "linhas_lidas": int(len(raw)), "linhas_validas": int(len(clean)),
+                                 "colunas": int(clean.shape[1])})
+        rows_after = len(hub)
+        processed_count = sum(1 for d in run_details if d["status"] == "processado")
+        ignored_count = sum(1 for d in run_details if d["status"] == "ignorado")
         st.session_state.hub_df = hub
         st.session_state.hub_key = key_col
         salvar_hub(hub, key_col)
-        processed_count = sum(1 for d in run_details if d["status"] == "processado")
-        ignored_count = sum(1 for d in run_details if d["status"] == "ignorado")
-        rows_after = len(hub)
         _run_entry = {
             "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
             "versao": f"RPA-{datetime.now().strftime('%Y.%m.%d.%H%M')}",
@@ -648,52 +652,18 @@ if uploaded_files:
         st.session_state.rpa_last_run = _run_entry
         st.session_state.rpa_runs.append(_run_entry)
         salvar_rpa_log(st.session_state.rpa_runs)
-        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
-        st.success(f"✅ Dados consolidados com sucesso — {ts}")
-        st.rerun()
+    st.sidebar.success(f"✅ {rows_after:,} registros prontos!")
+    # Re-detecta a partir dos dados reais após ingestão
+    _df_after = hub.copy()
+    _num_after = _df_after.select_dtypes(include=np.number).columns.tolist()
+    target_col = suggest_target(_df_after)
+    features_selecionadas = [c for c in _num_after if c != target_col]
+    tipo_problema = _detect_tipo(_df_after, target_col)
+    rodar = True
+elif analisar_tudo and _has_hub:
+    rodar = True
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 2️⃣ Configurar Modelo")
-st.sidebar.caption("Configure qual coluna prever e quais variaveis usar como entrada.")
-
-# Estado do hub
-df = st.session_state.hub_df.copy()
-is_demo_mode = False
-if df.empty:
-    df = build_demo_hub()
-    is_demo_mode = True
-
-# Configuracao do modelo (sidebar - secao 2)
-colunas_numericas = df.select_dtypes(include=np.number).columns.tolist()
-colunas_todas = df.columns.tolist()
-
-target_col = st.sidebar.selectbox(
-    "Coluna alvo (o que prever)",
-    options=colunas_todas,
-    index=colunas_todas.index(suggest_target(df)),
-    help="Qual coluna voce quer prever? Ex: contratou, valor, segmento.",
-)
-
-features_disponiveis = [c for c in colunas_numericas if c != target_col]
-features_selecionadas = st.sidebar.multiselect(
-    "Variaveis preditoras",
-    options=features_disponiveis,
-    default=features_disponiveis,
-    help="Selecione as colunas numericas que o modelo vai usar para aprender.",
-)
-
-tipo_problema = st.sidebar.radio(
-    "Tipo de analise",
-    ["Classificacao (sim/nao)", "Regressao (valor numerico)", "Clustering (agrupamento)"],
-    help="Classificacao: prever categoria. Regressao: prever numero. Clustering: descobrir grupos.",
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 3️⃣ Acoes")
-if not _hub_ok:
-    st.sidebar.caption("💡 Consolide seus dados no Passo 1 para habilitar a analise.")
-rodar = st.sidebar.button("▶ Rodar Analise ML", type="primary", use_container_width=True, disabled=not _hub_ok and len(features_disponiveis) == 0)
-
 if st.sidebar.button("📋 Painel RPA", use_container_width=True):
     st.session_state.rpa_panel_open = not st.session_state.rpa_panel_open
 
@@ -714,6 +684,30 @@ if st.session_state.confirm_limpar:
     if _cn.button("Cancelar", use_container_width=True, key="confirm_no"):
         st.session_state.confirm_limpar = False
         st.rerun()
+
+with st.sidebar.expander("🔄 Restaurar hub salvo"):
+    hub_restore = st.file_uploader(
+        "hub_dados.parquet",
+        type=["parquet"],
+        key="hub_restore",
+        label_visibility="collapsed",
+    )
+    if hub_restore is not None:
+        try:
+            _restored = pd.read_parquet(hub_restore)
+            st.session_state.hub_df = _restored
+            salvar_hub(_restored, st.session_state.get("hub_key", "id_cliente"))
+            st.success(f"✅ {len(_restored)} registros restaurados!")
+            st.rerun()
+        except Exception as _re:
+            st.error(f"Erro ao restaurar: {_re}")
+
+# ── Estado do hub ─────────────────────────────────────────────
+df = st.session_state.hub_df.copy()
+is_demo_mode = False
+if df.empty:
+    df = build_demo_hub()
+    is_demo_mode = True
 
 # ── Banner modo demo ─────────────────────────────────────────
 if is_demo_mode:
