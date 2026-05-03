@@ -379,6 +379,8 @@ def upsert_hub(base_df, new_df, key_col):
 
 
 def suggest_target(df):
+    if df is None or len(df.columns) == 0:
+        return "target"
     for c in ["contratou", "target", "y"]:
         if c in df.columns:
             return c
@@ -390,6 +392,8 @@ def suggest_key_column(df):
         return "id_cliente"
 
     cols = df.columns.tolist()
+    if not cols:
+        return "id_cliente"
     id_like = [
         c for c in cols
         if ("id" in c.lower()) or c.lower().endswith("_id") or ("codigo" in c.lower())
@@ -581,6 +585,7 @@ _num_cfg = _df_cfg.select_dtypes(include=np.number).columns.tolist()
 _all_cfg = _df_cfg.columns.tolist()
 _auto_target = suggest_target(_df_cfg)
 _auto_key = suggest_key_column(_df_cfg)
+_cfg_has_columns = len(_all_cfg) > 0
 
 def _detect_tipo(df_d, tgt):
     if tgt not in df_d.columns:
@@ -599,34 +604,41 @@ _tipo_opts = ["Classificacao (sim/nao)", "Regressao (valor numerico)", "Clusteri
 
 # ── Configurações avançadas (expander) ───────────────────────
 with st.sidebar.expander("⚙️ Configurações avançadas (opcional)"):
-    target_col = st.selectbox(
-        "Coluna alvo (o que prever)",
-        options=_all_cfg,
-        index=_all_cfg.index(_auto_target) if _auto_target in _all_cfg else 0,
-        help="Ex: contratou, valor, segmento.",
-    )
-    _feats_opts = [c for c in _num_cfg if c != target_col]
-    features_selecionadas = st.multiselect(
-        "Variáveis preditoras",
-        options=_feats_opts,
-        default=_feats_opts,
-        help="Colunas numéricas usadas no modelo.",
-    )
-    tipo_problema = st.radio(
-        "Tipo de análise",
-        _tipo_opts,
-        index=_tipo_opts.index(_auto_tipo_str),
-    )
-    key_col = st.selectbox(
-        "Chave única (evita duplicatas)",
-        options=_all_cfg,
-        index=_all_cfg.index(_auto_key) if _auto_key in _all_cfg else 0,
-    )
+    if _cfg_has_columns:
+        target_col = st.selectbox(
+            "Coluna alvo (o que prever)",
+            options=_all_cfg,
+            index=_all_cfg.index(_auto_target) if _auto_target in _all_cfg else 0,
+            help="Ex: contratou, valor, segmento.",
+        )
+        _feats_opts = [c for c in _num_cfg if c != target_col]
+        features_selecionadas = st.multiselect(
+            "Variáveis preditoras",
+            options=_feats_opts,
+            default=_feats_opts,
+            help="Colunas numéricas usadas no modelo.",
+        )
+        tipo_problema = st.radio(
+            "Tipo de análise",
+            _tipo_opts,
+            index=_tipo_opts.index(_auto_tipo_str),
+        )
+        key_col = st.selectbox(
+            "Chave única (evita duplicatas)",
+            options=_all_cfg,
+            index=_all_cfg.index(_auto_key) if _auto_key in _all_cfg else 0,
+        )
+    else:
+        st.warning("Não foi possível detectar colunas válidas na prévia do arquivo.")
+        target_col = "target"
+        features_selecionadas = []
+        tipo_problema = "Clustering (agrupamento)"
+        key_col = "id_cliente"
 
 st.sidebar.markdown("---")
 
 # ── Botão único ───────────────────────────────────────────────
-_can_analyze = bool(uploaded_files) or _has_hub
+_can_analyze = (bool(uploaded_files) or _has_hub) and _cfg_has_columns
 rodar = False
 
 analisar_tudo = st.sidebar.button(
@@ -636,7 +648,10 @@ analisar_tudo = st.sidebar.button(
     disabled=not _can_analyze,
 )
 if not _can_analyze:
-    st.sidebar.caption("⬆️ Arraste sua planilha acima para começar")
+    if uploaded_files and not _cfg_has_columns:
+        st.sidebar.caption("⚠️ Arquivo sem estrutura válida. Verifique cabeçalhos e formatação.")
+    else:
+        st.sidebar.caption("⬆️ Arraste sua planilha acima para começar")
 elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
