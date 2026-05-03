@@ -518,6 +518,22 @@ if "hub_df" not in st.session_state:
 st.sidebar.markdown("## 📊 ML Insights Hub")
 st.sidebar.markdown("---")
 
+# Guia de status
+_hub_ok = not st.session_state.hub_df.empty
+_step1 = "✅" if _hub_ok else "⏳"
+_step2 = "✅" if _hub_ok else "⬜"
+_step3 = "⬜"
+st.sidebar.markdown(
+    f"""
+    <div style='font-size:12px;color:#a6a9b6;line-height:2;padding:8px 0;'>
+    {_step1} Passo 1 — Carregar e consolidar dados<br>
+    {_step2} Passo 2 — Configurar modelo ML<br>
+    {_step3} Passo 3 — Rodar análise
+    </div>""",
+    unsafe_allow_html=True,
+)
+st.sidebar.markdown("---")
+
 # PASSO 1
 st.sidebar.markdown("### 1️⃣ Carregar Dados")
 st.sidebar.caption("Envie suas planilhas (Excel ou CSV). Varios arquivos sao consolidados automaticamente.")
@@ -570,6 +586,7 @@ if uploaded_files:
         help="Escolha a coluna que identifica unicamente cada cliente/registro.",
     )
 
+    st.sidebar.info("📂 Arquivo pronto. Clique em **▶ Consolidar no Hub** para carregar os dados.")
     ingest_now = st.sidebar.button("▶ Consolidar no Hub", type="primary", use_container_width=True)
     if ingest_now:
         hub = st.session_state.hub_df.copy()
@@ -673,7 +690,9 @@ tipo_problema = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 3️⃣ Acoes")
-rodar = st.sidebar.button("▶ Rodar Analise ML", type="primary", use_container_width=True)
+if not _hub_ok:
+    st.sidebar.caption("💡 Consolide seus dados no Passo 1 para habilitar a analise.")
+rodar = st.sidebar.button("▶ Rodar Analise ML", type="primary", use_container_width=True, disabled=not _hub_ok and len(features_disponiveis) == 0)
 
 if st.sidebar.button("📋 Painel RPA", use_container_width=True):
     st.session_state.rpa_panel_open = not st.session_state.rpa_panel_open
@@ -1004,7 +1023,11 @@ if not rodar:
     st.stop()
 
 if len(features_selecionadas) == 0:
-    st.error("Selecione ao menos uma variavel numerica preditora na barra lateral.")
+    st.error(
+        "**Nenhuma variavel numerica encontrada.**\n\n"
+        "O modelo precisa de pelo menos uma coluna com numeros (ex: preco, idade, score). "
+        "Verifique se sua planilha tem colunas numericas ou se a coluna alvo nao esta consumindo todas elas."
+    )
     st.stop()
 
 df_model = df[features_selecionadas + [target_col]].dropna()
