@@ -385,6 +385,38 @@ def suggest_target(df):
     return df.columns[-1]
 
 
+def suggest_key_column(df):
+    if df is None or df.empty:
+        return "id_cliente"
+
+    cols = df.columns.tolist()
+    id_like = [
+        c for c in cols
+        if ("id" in c.lower()) or c.lower().endswith("_id") or ("codigo" in c.lower())
+    ]
+    ranked = id_like + [c for c in cols if c not in id_like]
+
+    best_col = ranked[0]
+    best_score = -1.0
+    best_unique = -1
+
+    for c in ranked:
+        s = df[c]
+        non_null = int(s.notna().sum())
+        if non_null == 0:
+            continue
+        uniq = int(s.nunique(dropna=True))
+        ratio = uniq / max(1, non_null)
+        score = ratio + (0.05 if c in id_like else 0.0)
+
+        if score > best_score or (score == best_score and uniq > best_unique):
+            best_col = c
+            best_score = score
+            best_unique = uniq
+
+    return best_col
+
+
 def make_binary(y):
     if pd.api.types.is_numeric_dtype(y):
         uniq = sorted(pd.Series(y).dropna().unique().tolist())
@@ -509,6 +541,8 @@ if "rpa_runs" not in st.session_state:
     st.session_state.rpa_runs = carregar_rpa_log()
 if "confirm_limpar" not in st.session_state:
     st.session_state.confirm_limpar = False
+if "upload_attempted" not in st.session_state:
+    st.session_state.upload_attempted = False
 if "hub_df" not in st.session_state:
     _df_disk, _key_disk = carregar_hub()
     st.session_state.hub_df = _df_disk
@@ -546,8 +580,7 @@ else:
 _num_cfg = _df_cfg.select_dtypes(include=np.number).columns.tolist()
 _all_cfg = _df_cfg.columns.tolist()
 _auto_target = suggest_target(_df_cfg)
-_cands_k = [c for c in _all_cfg if "id" in c.lower() or c.endswith("_id")]
-_auto_key = "id_cliente" if "id_cliente" in _all_cfg else (_cands_k[0] if _cands_k else _all_cfg[0])
+_auto_key = suggest_key_column(_df_cfg)
 
 def _detect_tipo(df_d, tgt):
     if tgt not in df_d.columns:
@@ -609,6 +642,7 @@ elif _has_hub and not uploaded_files:
 
 # ── Lógica do botão ───────────────────────────────────────────
 if analisar_tudo and uploaded_files:
+    st.session_state.upload_attempted = True
     with st.spinner("⏳ Carregando e processando dados..."):
         hub = st.session_state.hub_df.copy()
         rows_before = len(hub)
@@ -652,14 +686,21 @@ if analisar_tudo and uploaded_files:
         st.session_state.rpa_last_run = _run_entry
         st.session_state.rpa_runs.append(_run_entry)
         salvar_rpa_log(st.session_state.rpa_runs)
-    st.sidebar.success(f"✅ {rows_after:,} registros prontos!")
-    # Re-detecta a partir dos dados reais após ingestão
-    _df_after = hub.copy()
-    _num_after = _df_after.select_dtypes(include=np.number).columns.tolist()
-    target_col = suggest_target(_df_after)
-    features_selecionadas = [c for c in _num_after if c != target_col]
-    tipo_problema = _detect_tipo(_df_after, target_col)
-    rodar = True
+    if processed_count == 0 or rows_after == 0:
+        st.sidebar.error(
+            "Nenhum registro válido foi consolidado. "
+            "Abra as Configurações avançadas e ajuste a chave única."
+        )
+        rodar = False
+    else:
+        st.sidebar.success(f"✅ {rows_after:,} registros prontos!")
+        # Re-detecta a partir dos dados reais após ingestão
+        _df_after = hub.copy()
+        _num_after = _df_after.select_dtypes(include=np.number).columns.tolist()
+        target_col = suggest_target(_df_after)
+        features_selecionadas = [c for c in _num_after if c != target_col]
+        tipo_problema = _detect_tipo(_df_after, target_col)
+        rodar = True
 elif analisar_tudo and _has_hub:
     rodar = True
 
@@ -705,7 +746,7 @@ with st.sidebar.expander("🔄 Restaurar hub salvo"):
 # ── Estado do hub ─────────────────────────────────────────────
 df = st.session_state.hub_df.copy()
 is_demo_mode = False
-if df.empty:
+if df.empty and not st.session_state.get("upload_attempted", False):
     df = build_demo_hub()
     is_demo_mode = True
 
