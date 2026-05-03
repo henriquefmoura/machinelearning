@@ -34,7 +34,114 @@ import io
 from pathlib import Path
 from datetime import datetime
 
+def inject_custom_css():
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"], .stMarkdown, [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"], .stButton button, input, textarea, select {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    }
+
+    /* KPI Cards */
+    [data-testid="stMetric"] {
+        background: #1e2530 !important;
+        border: 1px solid #2d3748 !important;
+        border-radius: 12px !important;
+        padding: 20px 24px !important;
+        transition: border-color 0.15s ease !important;
+    }
+    [data-testid="stMetric"]:hover { border-color: rgba(78,140,255,0.5) !important; }
+    [data-testid="stMetricLabel"] p {
+        font-size: 12px !important; font-weight: 600 !important;
+        color: #a6a9b6 !important; text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 26px !important; font-weight: 700 !important; color: #fafafa !important;
+    }
+
+    /* Primary button */
+    .stButton > button[kind="primary"] {
+        background: #4e8cff !important; border: none !important;
+        border-radius: 8px !important; font-weight: 600 !important;
+        transition: background 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: #3a73e6 !important;
+        box-shadow: 0 4px 12px rgba(78,140,255,0.35) !important;
+    }
+    /* Secondary/default button */
+    .stButton > button:not([kind="primary"]) {
+        background: transparent !important;
+        border: 1px solid #2d3748 !important; border-radius: 8px !important;
+        color: #fafafa !important; font-weight: 500 !important;
+        transition: border-color 0.15s ease, background 0.15s ease !important;
+    }
+    .stButton > button:not([kind="primary"]):hover {
+        border-color: #4e8cff !important;
+        background: rgba(78,140,255,0.06) !important;
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] { border-bottom: 1px solid #2d3748 !important; gap: 0 !important; }
+    .stTabs [data-baseweb="tab"] {
+        background: transparent !important; border: none !important;
+        color: #a6a9b6 !important; font-weight: 500 !important;
+        padding: 12px 20px !important;
+        border-bottom: 2px solid transparent !important;
+        transition: all 0.15s ease !important;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        color: #4e8cff !important; border-bottom: 2px solid #4e8cff !important;
+    }
+    .stTabs [data-baseweb="tab"]:hover { color: #fafafa !important; background: transparent !important; }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] { background: #161b25 !important; border-right: 1px solid #2d3748 !important; }
+    [data-testid="stSidebar"] h3 {
+        font-size: 11px !important; font-weight: 700 !important;
+        color: #6b7280 !important; text-transform: uppercase !important;
+        letter-spacing: 0.1em !important;
+    }
+
+    /* Dataframe */
+    [data-testid="stDataFrame"] { border-radius: 8px !important; overflow: hidden !important; border: 1px solid #2d3748 !important; }
+
+    /* Alerts */
+    [data-testid="stAlert"] { border-radius: 8px !important; border-left-width: 4px !important; }
+
+    /* File uploader */
+    [data-testid="stFileUploader"] {
+        background: #1e2530 !important; border: 2px dashed #2d3748 !important;
+        border-radius: 12px !important; transition: border-color 0.15s ease !important;
+    }
+    [data-testid="stFileUploader"]:hover { border-color: #4e8cff !important; }
+
+    /* RPA Status Badges */
+    .badge {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 4px 12px; border-radius: 9999px;
+        font-size: 12px; font-weight: 600;
+    }
+    .badge-success { background: rgba(16,185,129,0.12); color: #10b981; }
+    .badge-error   { background: rgba(239,68,68,0.12);  color: #ef4444; }
+    .badge-warning { background: rgba(245,158,11,0.12); color: #f59e0b; }
+    .badge-info    { background: rgba(59,130,246,0.12); color: #3b82f6; }
+
+    /* Dividers */
+    hr { border-color: #2d3748 !important; }
+
+    /* Hide Streamlit footer */
+    footer { visibility: hidden !important; }
+    #MainMenu { visibility: hidden !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide")
+inject_custom_css()
 
 HUB_FILE = Path("hub_dados.parquet")
 HUB_KEY_FILE = Path("hub_key.txt")
@@ -138,23 +245,29 @@ def require_authentication():
     if st.session_state.get("auth_ok", False):
         return
 
-    _, col_c, _ = st.columns([1, 1.6, 1])
+    _, col_c, _ = st.columns([1, 1.5, 1])
     with col_c:
-        st.markdown("<h2 style='text-align:center'>📊 ML Insights Hub</h2>", unsafe_allow_html=True)
-        st.markdown(
-            "<p style='text-align:center; color:#aaa;'>Plataforma inteligente de dados e machine learning</p>",
-            unsafe_allow_html=True,
-        )
-        st.markdown("---")
-        st.markdown("#### Acesso ao painel")
-        senha = st.text_input("Senha", type="password", placeholder="Digite sua senha...")
-        if st.button("Entrar", type="primary", use_container_width=True):
-            if hmac.compare_digest(senha, APP_PASSWORD):
-                st.session_state.auth_ok = True
-                st.rerun()
-            else:
-                st.error("Senha incorreta. Tente novamente.")
-        st.caption("Senha padrao: mlhub123 | Para personalizar, defina APP_PASSWORD em Settings > Secrets no Streamlit Cloud.")
+        st.markdown("""
+        <div style="text-align:center; margin-bottom:24px;">
+            <div style="display:inline-flex;align-items:center;justify-content:center;
+                        width:64px;height:64px;background:rgba(78,140,255,0.12);
+                        border-radius:16px;font-size:32px;margin-bottom:16px;">📊</div>
+            <h2 style="font-size:24px;font-weight:700;margin-bottom:6px;color:#fafafa;">ML Insights Hub</h2>
+            <p style="color:#a6a9b6;font-size:14px;margin:0;">
+                Análise preditiva e automação inteligente para seu negócio</p>
+        </div>
+        """, unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("##### 🔑 Acesso ao painel")
+            senha = st.text_input("Senha", type="password", placeholder="••••••••", label_visibility="collapsed")
+            st.caption("Senha")
+            if st.button("Acessar Dashboard", type="primary", use_container_width=True):
+                if hmac.compare_digest(senha, APP_PASSWORD):
+                    st.session_state.auth_ok = True
+                    st.rerun()
+                else:
+                    st.error("❌ Senha incorreta. Tente novamente.")
+        st.caption("Senha padrão: mlhub123 | Personalize em Settings > Secrets no Streamlit Cloud.")
     st.stop()
 
 
@@ -394,6 +507,8 @@ if "rpa_last_run" not in st.session_state:
     st.session_state.rpa_last_run = None
 if "rpa_runs" not in st.session_state:
     st.session_state.rpa_runs = carregar_rpa_log()
+if "confirm_limpar" not in st.session_state:
+    st.session_state.confirm_limpar = False
 if "hub_df" not in st.session_state:
     _df_disk, _key_disk = carregar_hub()
     st.session_state.hub_df = _df_disk
@@ -564,22 +679,36 @@ if st.sidebar.button("📋 Painel RPA", use_container_width=True):
     st.session_state.rpa_panel_open = not st.session_state.rpa_panel_open
 
 if st.sidebar.button("🗑 Limpar Hub", use_container_width=True):
-    st.session_state.hub_df = pd.DataFrame()
-    if HUB_FILE.exists():
-        HUB_FILE.unlink()
-    if HUB_KEY_FILE.exists():
-        HUB_KEY_FILE.unlink()
-    st.rerun()
+    st.session_state.confirm_limpar = True
+
+if st.session_state.confirm_limpar:
+    st.sidebar.warning("⚠️ Isso apagará **todos os dados** do hub. Confirma?")
+    _cy, _cn = st.sidebar.columns(2)
+    if _cy.button("Sim, limpar", use_container_width=True, key="confirm_yes"):
+        st.session_state.hub_df = pd.DataFrame()
+        if HUB_FILE.exists():
+            HUB_FILE.unlink()
+        if HUB_KEY_FILE.exists():
+            HUB_KEY_FILE.unlink()
+        st.session_state.confirm_limpar = False
+        st.rerun()
+    if _cn.button("Cancelar", use_container_width=True, key="confirm_no"):
+        st.session_state.confirm_limpar = False
+        st.rerun()
 
 # ── Banner modo demo ─────────────────────────────────────────
 if is_demo_mode:
-    st.info(
-        "**Modo demonstracao ativo** — o dashboard abaixo usa dados de exemplo. "
-        "Para analisar seus proprios dados:\n"
-        "1. Na barra lateral, clique em **Carregar Dados** e envie sua planilha.\n"
-        "2. Selecione a coluna de identificacao unica.\n"
-        "3. Clique em **Consolidar no Hub**."
-    )
+    st.markdown("""
+    <div style="background:#1e2530;border:2px dashed #2d3748;border-radius:12px;
+                padding:32px;text-align:center;margin-bottom:24px;">
+        <div style="font-size:48px;margin-bottom:12px;">📊</div>
+        <h3 style="color:#fafafa;font-weight:700;margin-bottom:8px;">Nenhum dado carregado ainda</h3>
+        <p style="color:#a6a9b6;font-size:14px;margin-bottom:4px;">
+            Carregue sua primeira planilha na barra lateral para começar a análise.<br>
+            <span style="color:#6b7280;">Abaixo você vê uma demonstração com dados de exemplo.</span>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # DASHBOARD
@@ -606,17 +735,21 @@ if st.session_state.get("rpa_panel_open", False):
                 "para que o RPA registre o historico aqui."
             )
         else:
-            st.caption(f"Ultima execucao: {rpa['timestamp']}")
+            _hdr, _badge = st.columns([3, 1])
+            _hdr.caption(f"Ultima execucao: **{rpa['timestamp']}**")
+            _badge.markdown('<span class="badge badge-success">✅ Concluído</span>', unsafe_allow_html=True)
             r1, r2, r3, r4, r5 = st.columns(5)
             r1.metric("Versao", rpa["versao"])
             r2.metric("Arquivos OK", f"{rpa['arquivos_processados']}/{rpa['arquivos_recebidos']}")
             r3.metric("Ignorados", rpa["arquivos_ignorados"])
             r4.metric("Novos registros", f"{rpa['delta_linhas']:+,}")
             r5.metric("Chave usada", rpa["chave"])
+            _delta_color = "#10b981" if rpa['delta_linhas'] >= 0 else "#ef4444"
             st.markdown(
-                f"- Registros antes: **{rpa['linhas_antes']:,}** → depois: **{rpa['linhas_depois']:,}**\n"
-                f"- Arquivos ignorados: **{rpa['arquivos_ignorados']}** (chave nao encontrada)\n"
-                "- Status: ✅ concluido"
+                f"- Registros antes: **{rpa['linhas_antes']:,}** → depois: "
+                f"<span style='color:{_delta_color};font-weight:600;'>{rpa['linhas_depois']:,}</span>\n"
+                f"- Arquivos ignorados: **{rpa['arquivos_ignorados']}** (chave nao encontrada)",
+                unsafe_allow_html=True
             )
             with st.expander("Detalhes por arquivo"):
                 st.dataframe(pd.DataFrame(rpa["detalhes"]), use_container_width=True)
@@ -655,10 +788,10 @@ missing_total = int(df.isnull().sum().sum())
 missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
 
 kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
-kpi_1.metric("Clientes", f"{df.shape[0]:,}")
-kpi_2.metric("Atributos", f"{df.shape[1]:,}")
-kpi_3.metric("Valores ausentes", f"{missing_total:,}")
-kpi_4.metric("Qualidade preenchimento", f"{100 - missing_pct:.1f}%")
+kpi_1.metric("👥 Clientes Analisados", f"{df.shape[0]:,}")
+kpi_2.metric("📊 Variaveis de Analise", f"{df.shape[1]:,}")
+kpi_3.metric("⚠️ Dados Incompletos", f"{missing_total:,}")
+kpi_4.metric("✅ Qualidade dos Dados", f"{100 - missing_pct:.1f}%")
 
 tab_overview, tab_profile, tab_rel, tab_export = st.tabs([
     "📋 Visao Geral",
