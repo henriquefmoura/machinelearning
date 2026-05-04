@@ -113,6 +113,14 @@ def main():
         print(f"Amostrando {max_linhas:,} linhas aleatórias (seed=42 para reproducibilidade)...")
         df = df.sample(max_linhas, random_state=42).reset_index(drop=True)
 
+    # Corrigir colunas com tipos mistos (int + str na mesma coluna object)
+    print("Normalizando tipos de colunas para compatibilidade com Parquet...")
+    for col in df.select_dtypes(include=["object", "string"]).columns:
+        try:
+            df[col] = pd.to_numeric(df[col], errors="raise")
+        except (ValueError, TypeError):
+            df[col] = df[col].astype(str).where(df[col].notna(), other=None)
+
     print(f"Salvando como Parquet comprimido (snappy)...")
     df.to_parquet(saida, index=False, compression="snappy")
 
