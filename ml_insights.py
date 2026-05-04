@@ -575,7 +575,8 @@ _has_hub = not st.session_state.hub_df.empty
 
 if uploaded_files:
     try:
-        _preview_rows = 5000 if large_mode else None`n        _raw_prev = read_uploaded_file(uploaded_files[0], nrows=_preview_rows)
+        _preview_rows = 5000 if large_mode else None
+        _raw_prev = read_uploaded_file(uploaded_files[0], nrows=_preview_rows)
         _df_cfg, _, _ = preprocess_df(_raw_prev)
     except Exception:
         _df_cfg = st.session_state.hub_df.copy()
