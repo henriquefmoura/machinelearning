@@ -149,7 +149,7 @@ try:
 except Exception:
     IS_CLOUD = False
 
-APP_SCHEMA_VERSION = "2026-05-04-v5"
+APP_SCHEMA_VERSION = "2026-05-04-v6"
 LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
@@ -602,13 +602,21 @@ st.sidebar.markdown("---")
 
 # ── Upload ────────────────────────────────────────────────────
 st.sidebar.markdown("### 📁 Sua planilha")
+st.sidebar.info(
+    "**Arquivo grande (>100 MB)?**\n\n"
+    "1. Baixe `preparar_dados.py` do GitHub\n"
+    "2. Execute: `uv run preparar_dados.py seu_arquivo.xlsx`\n"
+    "3. Envie o `.parquet` gerado aqui\n\n"
+    "Parquet é 5–10× menor e carrega sem travar.",
+    icon="💡",
+)
 uploaded_files = st.sidebar.file_uploader(
-    "Excel ou CSV",
-    type=["xlsx", "xls", "csv"],
+    "Parquet / CSV / Excel",
+    type=["parquet", "csv", "xlsx", "xls"],
     accept_multiple_files=True,
     label_visibility="collapsed",
 )
-st.sidebar.caption("Formato recomendado: CSV UTF-8 (separador ',' ou ';'), sem formulas, em lotes <= 200 MB.")
+st.sidebar.caption("Prioridade: .parquet (rápido) › .csv › .xlsx")
 current_upload_hash = compute_upload_hash(uploaded_files)
 total_upload_mb = (sum(getattr(f, "size", 0) for f in uploaded_files) / (1024 * 1024)) if uploaded_files else 0
 large_mode = total_upload_mb >= LARGE_FILE_THRESHOLD_MB
@@ -722,6 +730,25 @@ if analisar_tudo and uploaded_files:
         ignored_count = 0
         for f in uploaded_files:
             try:
+                # ── Parquet: caminho mais eficiente, sem chunking necessário ──
+                if f.name.lower().endswith(".parquet"):
+                    _pq_bytes = f.getvalue()
+                    raw = pd.read_parquet(io.BytesIO(_pq_bytes))
+                    del _pq_bytes
+                    if len(raw) > MAX_DASHBOARD_ROWS:
+                        raw = raw.sample(MAX_DASHBOARD_ROWS, random_state=42).reset_index(drop=True)
+                    clean, _, _ = preprocess_df(raw)
+                    del raw
+                    if clean.empty:
+                        ignored_count += 1
+                        continue
+                    rows_ingested += len(clean)
+                    hub, used_key = merge_clean_into_hub_sampled(hub, clean, key_col, MAX_DASHBOARD_ROWS)
+                    if used_key:
+                        st.session_state.hub_key = used_key
+                    processed_count += 1
+                    continue
+
                 if large_mode and f.name.lower().endswith(".csv"):
                     file_had_rows = False
                     for chunk in iter_uploaded_csv_chunks(f):
