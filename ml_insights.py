@@ -306,10 +306,8 @@ def preprocess_df(raw_df):
     return df, original_cols, final_cols
 
 
-def _detect_csv_sep(uploaded_file):
-    uploaded_file.seek(0)
-    text_sample = uploaded_file.read(8192).decode("utf-8", errors="ignore")
-    uploaded_file.seek(0)
+def _detect_csv_sep_bytes(raw_bytes):
+    text_sample = raw_bytes[:8192].decode("utf-8", errors="ignore")
     try:
         dialect = csv.Sniffer().sniff(text_sample, delimiters=[",", ";", "\t", "|"])
         return dialect.delimiter
@@ -318,22 +316,19 @@ def _detect_csv_sep(uploaded_file):
 
 
 def read_uploaded_file(uploaded_file, nrows=None):
+    raw_bytes = uploaded_file.getvalue()
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
-        sep = _detect_csv_sep(uploaded_file)
-        df = pd.read_csv(uploaded_file, sep=sep, nrows=nrows, low_memory=False)
-        uploaded_file.seek(0)
-        return df
-    df = pd.read_excel(uploaded_file, nrows=nrows)
-    uploaded_file.seek(0)
-    return df
+        sep = _detect_csv_sep_bytes(raw_bytes)
+        return pd.read_csv(io.BytesIO(raw_bytes), sep=sep, nrows=nrows, low_memory=False)
+    return pd.read_excel(io.BytesIO(raw_bytes), nrows=nrows)
 
 
 def iter_uploaded_csv_chunks(uploaded_file, chunksize=100_000):
-    sep = _detect_csv_sep(uploaded_file)
-    for chunk in pd.read_csv(uploaded_file, sep=sep, chunksize=chunksize, low_memory=False):
+    raw_bytes = uploaded_file.getvalue()
+    sep = _detect_csv_sep_bytes(raw_bytes)
+    for chunk in pd.read_csv(io.BytesIO(raw_bytes), sep=sep, chunksize=chunksize, low_memory=False):
         yield chunk
-    uploaded_file.seek(0)
 
 
 def compute_upload_hash(files):
@@ -679,34 +674,40 @@ if analisar_tudo and uploaded_files:
                     raw = pd.concat(raw_parts, ignore_index=True) if raw_parts else pd.DataFrame()
                 else:
                     raw = read_uploaded_file(f)
-            except Exception as _e:
-                st.sidebar.error(f"Erro ao ler {f.name}: {_e}")
-                continue
 
-            clean, _, _ = preprocess_df(raw)
-            if clean.empty:
-                ignored_count += 1
-                continue
+                clean, _, _ = preprocess_df(raw)
+                if clean.empty:
+                    ignored_count += 1
+                    continue
 
-            current_key = key_col if key_col in clean.columns else suggest_key_column(clean)
+                current_key = key_col if key_col in clean.columns else suggest_key_column(clean)
 
-            if current_key in clean.columns:
-                clean = clean.dropna(subset=[current_key])
-                valid_count = int(clean[current_key].notna().sum())
-                uniq_count = int(clean[current_key].nunique(dropna=True))
-                uniq_ratio = (uniq_count / max(1, valid_count)) if valid_count > 0 else 0
-                if valid_count > 0 and uniq_ratio >= 0.95:
-                    clean = clean.drop_duplicates(subset=[current_key], keep="last")
-                    hub = upsert_hub(hub, clean, current_key)
-                    st.session_state.hub_key = current_key
+                if current_key in clean.columns:
+                    clean = clean.dropna(subset=[current_key])
+                    valid_count = int(clean[current_key].notna().sum())
+                    uniq_count = int(clean[current_key].nunique(dropna=True))
+                    uniq_ratio = (uniq_count / max(1, valid_count)) if valid_count > 0 else 0
+                    if valid_count > 0 and uniq_ratio >= 0.95:
+                        clean = clean.drop_duplicates(subset=[current_key], keep="last")
+                        hub = upsert_hub(hub, clean, current_key)
+                        st.session_state.hub_key = current_key
+                    else:
+                        hub = pd.concat([hub, clean], ignore_index=True)
+                        hub = hub.drop_duplicates(keep="last")
                 else:
                     hub = pd.concat([hub, clean], ignore_index=True)
                     hub = hub.drop_duplicates(keep="last")
-            else:
-                hub = pd.concat([hub, clean], ignore_index=True)
-                hub = hub.drop_duplicates(keep="last")
 
-            processed_count += 1
+                processed_count += 1
+            except MemoryError:
+                st.sidebar.error(
+                    f"❌ {f.name}: arquivo muito grande para a memória disponível. "
+                    "Converta para CSV e tente novamente."
+                )
+            except Exception as _e:
+                st.sidebar.error(f"❌ Erro ao processar {f.name}: {_e}")
+                import traceback as _tb
+                print(f"[ML_INSIGHTS] Erro em {f.name}:", _tb.format_exc(), flush=True)
 
         rows_after = len(hub)
         st.session_state.hub_df = hub
