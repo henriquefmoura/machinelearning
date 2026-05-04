@@ -131,6 +131,8 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 
+import gc
+
 st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide")
 inject_custom_css()
 
@@ -149,7 +151,7 @@ try:
 except Exception:
     IS_CLOUD = False
 
-APP_SCHEMA_VERSION = "2026-05-04-v6"
+APP_SCHEMA_VERSION = "2026-05-04-v7"
 LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
@@ -888,6 +890,15 @@ else:
 numeric_cols = df_view.select_dtypes(include=np.number).columns.tolist()
 cat_cols = [c for c in df_view.columns if c not in numeric_cols and df_view[c].nunique() <= 30]
 
+# Limitar colunas para evitar graficos pesados demais
+MAX_CHART_NUM = 12
+MAX_CHART_CAT = 4
+MAX_CORR_COLS = 10
+MAX_SCATTER_ROWS = 5_000
+numeric_cols_chart = numeric_cols[:MAX_CHART_NUM]
+cat_cols_chart = cat_cols[:MAX_CHART_CAT]
+numeric_cols_corr = numeric_cols[:MAX_CORR_COLS]
+
 st.markdown("## 📈 Dashboard Executivo")
 st.caption(
     "Visao completa dos dados consolidados no hub. "
@@ -916,12 +927,12 @@ with tab_overview:
     left, right = st.columns([1.4, 1])
     with left:
         st.markdown("#### Amostra dos dados")
-        st.dataframe(df_view.head(15), use_container_width=True)
+        st.dataframe(df_view.head(15), width='stretch')
     with right:
         st.markdown("#### Estatisticas descritivas")
         if numeric_cols:
-            summary = df_view[numeric_cols].describe().T[["mean", "std", "min", "max"]].round(2)
-            st.dataframe(summary, use_container_width=True)
+            summary = df_view[numeric_cols_chart].describe().T[["mean", "std", "min", "max"]].round(2)
+            st.dataframe(summary, width='stretch')
         else:
             st.info("Nenhuma coluna numerica encontrada para estatisticas.")
 
@@ -942,26 +953,28 @@ with tab_profile:
     st.markdown("Visualize como os dados se distribuem — ideal para identificar padroes, outliers e concentracoes.")
     if numeric_cols:
         st.markdown("#### Distribuicao das variaveis numericas")
-        n = len(numeric_cols)
+        n = len(numeric_cols_chart)
         ncols = min(3, n)
         nrows = (n + ncols - 1) // ncols
         fig_dist, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.4 * nrows))
         axes = np.array(axes).flatten() if n > 1 else [axes]
-        for i, c in enumerate(numeric_cols):
-            axes[i].hist(df_view[c].dropna(), bins=20, color="#4e8cff", edgecolor="white", alpha=0.85)
+        for i, c in enumerate(numeric_cols_chart):
+            axes[i].hist(df_view[c].dropna().values, bins=25, color="#4e8cff", edgecolor="white", alpha=0.85)
             axes[i].set_title(c.replace("_", " ").title(), fontsize=10)
             axes[i].set_ylabel("Frequência")
         for j in range(i + 1, len(axes)):
             axes[j].set_visible(False)
         fig_dist.tight_layout()
         st.pyplot(fig_dist)
-        plt.close()
+        plt.close(fig_dist)
+        del fig_dist, axes
+        gc.collect()
 
     if cat_cols:
         st.markdown("#### Distribuicao das categorias")
         ccol1, ccol2 = st.columns(2)
-        for idx, c in enumerate(cat_cols[:6]):
-            vcounts = df_view[c].value_counts().head(12)
+        for idx, c in enumerate(cat_cols_chart):
+            vcounts = df_view[c].value_counts().head(10)
             fig_cat, ax_cat = plt.subplots(figsize=(7, 3.2))
             ax_cat.barh(vcounts.index.astype(str), vcounts.values, color="#2ecc71", edgecolor="white")
             ax_cat.set_title(c.replace("_", " ").title(), fontsize=10)
@@ -972,15 +985,17 @@ with tab_profile:
                 ccol1.pyplot(fig_cat)
             else:
                 ccol2.pyplot(fig_cat)
-            plt.close()
+            plt.close(fig_cat)
+        gc.collect()
 
 with tab_rel:
     st.markdown("Explore relacoes entre variaveis. Correlacoes altas indicam que uma variavel pode prever a outra.")
-    if len(numeric_cols) >= 2:
+    if len(numeric_cols_corr) >= 2:
         st.markdown("#### Mapa de correlacao")
         st.caption("Valores proximos de +1 ou -1 indicam relacao forte. Proximos de 0 indicam independencia.")
-        corr = df_view[numeric_cols].corr(numeric_only=True)
-        fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(numeric_cols)), max(5, len(numeric_cols) - 1)))
+        corr = df_view[numeric_cols_corr].corr(numeric_only=True)
+        _sz = max(6, len(numeric_cols_corr))
+        fig_corr, ax_corr = plt.subplots(figsize=(_sz, _sz - 1))
         cax = ax_corr.matshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
         fig_corr.colorbar(cax)
         ax_corr.set_xticks(range(len(corr.columns)))
@@ -992,36 +1007,41 @@ with tab_rel:
                          color="white" if abs(val) > 0.5 else "black")
         fig_corr.tight_layout()
         st.pyplot(fig_corr)
-        plt.close()
+        plt.close(fig_corr)
+        del fig_corr, corr
+        gc.collect()
 
         st.markdown("#### Relacao entre duas variaveis")
         st.caption("Selecione dois atributos para ver como eles se relacionam no grafico de dispersao.")
         rel1, rel2, rel3 = st.columns(3)
-        col_x = rel1.selectbox("Eixo X", numeric_cols, index=0, key="dash_x")
-        col_y = rel2.selectbox("Eixo Y", numeric_cols, index=min(1, len(numeric_cols) - 1), key="dash_y")
-        color_by = rel3.selectbox("Colorir por", ["Nenhum"] + cat_cols, key="dash_color")
+        col_x = rel1.selectbox("Eixo X", numeric_cols_corr, index=0, key="dash_x")
+        col_y = rel2.selectbox("Eixo Y", numeric_cols_corr, index=min(1, len(numeric_cols_corr) - 1), key="dash_y")
+        color_by = rel3.selectbox("Colorir por", ["Nenhum"] + cat_cols_chart, key="dash_color")
 
+        # Amostrar para scatter nao travar
+        _sc_df = df_view if len(df_view) <= MAX_SCATTER_ROWS else df_view.sample(MAX_SCATTER_ROWS, random_state=42)
         fig_sc, ax_sc = plt.subplots(figsize=(8.6, 4.8))
         if color_by != "Nenhum":
-            for grupo, sub in df_view.groupby(color_by):
-                ax_sc.scatter(sub[col_x], sub[col_y], label=str(grupo), alpha=0.7, s=40)
+            for grupo, sub in _sc_df.groupby(color_by):
+                ax_sc.scatter(sub[col_x], sub[col_y], label=str(grupo), alpha=0.7, s=20)
             ax_sc.legend(title=color_by.replace("_", " ").title(), fontsize=8)
         else:
-            ax_sc.scatter(df_view[col_x], df_view[col_y], alpha=0.6, color="#9b59b6", s=40)
+            ax_sc.scatter(_sc_df[col_x], _sc_df[col_y], alpha=0.5, color="#9b59b6", s=20)
         ax_sc.set_xlabel(col_x.replace("_", " ").title())
         ax_sc.set_ylabel(col_y.replace("_", " ").title())
         fig_sc.tight_layout()
         st.pyplot(fig_sc)
-        plt.close()
+        plt.close(fig_sc)
+        gc.collect()
 
     date_cols = [c for c in df_view.columns if "data" in c.lower() or "date" in c.lower() or "mes" in c.lower()]
-    if date_cols and numeric_cols:
+    if date_cols and numeric_cols_chart:
         st.markdown("### Evolução temporal")
         dcol = date_cols[0]
-        vcol = st.selectbox("Variável temporal", numeric_cols, key="ts_var")
+        vcol = st.selectbox("Variável temporal", numeric_cols_chart, key="ts_var")
         try:
             df_ts = df_view[[dcol, vcol]].dropna().copy()
-            df_ts[dcol] = pd.to_datetime(df_ts[dcol], dayfirst=True, errors="coerce")
+            df_ts[dcol] = pd.to_datetime(df_ts[dcol], dayfirst=False, errors="coerce")
             df_ts = df_ts.dropna(subset=[dcol]).sort_values(dcol)
             df_ts_g = df_ts.groupby(dcol)[vcol].mean()
             fig_ts, ax_ts = plt.subplots(figsize=(9, 4))
@@ -1031,7 +1051,8 @@ with tab_rel:
             ax_ts.set_ylabel(vcol.replace("_", " ").title())
             fig_ts.tight_layout()
             st.pyplot(fig_ts)
-            plt.close()
+            plt.close(fig_ts)
+            gc.collect()
         except Exception:
             st.info("Coluna de data encontrada, mas não foi possível interpretar os valores.")
 
@@ -1039,28 +1060,34 @@ with tab_export:
     st.markdown("#### Exportar base consolidada")
     st.markdown(
         "Baixe os dados tratados para usar em outros sistemas ou para restaurar o hub depois.\n"
-        "- **Excel**: ideal para abrir no Excel/Sheets.\n"
-        "- **Parquet**: formato otimizado para reimportar neste hub."
+        "- **Parquet**: formato otimizado para reimportar neste hub (mais rápido).\n"
+        "- **Excel**: apenas para bases pequenas (< 50 MB). Gera sob demanda."
     )
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Hub")
-    buf.seek(0)
 
     exp1, exp2 = st.columns(2)
-    exp1.download_button(
-        "Baixar Excel consolidado",
-        data=buf,
-        file_name="hub_clientes.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
     exp2.download_button(
-        "Baixar Parquet consolidado",
+        "⬇️ Baixar Parquet",
         data=hub_para_bytes(df),
         file_name="hub_dados.parquet",
         mime="application/octet-stream",
     )
+    if exp1.button("⬇️ Gerar e Baixar Excel"):
+        if len(df) > 50_000:
+            st.warning(f"Base grande ({len(df):,} linhas). Exportando primeiras 50.000 linhas para Excel.")
+            df_xl = df.head(50_000)
+        else:
+            df_xl = df
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df_xl.to_excel(writer, index=False, sheet_name="Hub")
+        buf.seek(0)
+        st.download_button(
+            "Clique aqui para baixar",
+            data=buf,
+            file_name="hub_clientes.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_excel_lazy",
+        )
 
 with st.expander("🤖 Assistente IA para Insights", expanded=False):
     st.markdown(
