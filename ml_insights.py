@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import traceback as _traceback
 
 import streamlit as st
@@ -11,6 +11,8 @@ import requests
 import json
 import hmac
 import csv
+import hashlib
+from datetime import datetime
 
 # Log de diagnóstico — aparece em Streamlit Cloud > Manage app > Logs
 print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
@@ -147,6 +149,10 @@ try:
 except Exception:
     IS_CLOUD = False
 
+APP_SCHEMA_VERSION = "2026-05-04-v3"
+LARGE_FILE_THRESHOLD_MB = 300
+MAX_DASHBOARD_ROWS = 200_000
+
 
 def salvar_hub(df, key):
     """Salva em disco quando local; na nuvem usa apenas session_state."""
@@ -176,41 +182,6 @@ def hub_para_bytes(df):
     buf.seek(0)
     return buf.read()
 
-
-def build_demo_hub():
-    return pd.DataFrame(
-        {
-            "id_cliente": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
-            "nome": [
-                "Cliente A",
-                "Cliente B",
-                "Cliente C",
-                "Cliente D",
-                "Cliente E",
-                "Cliente F",
-                "Cliente G",
-                "Cliente H",
-                "Cliente I",
-                "Cliente J",
-            ],
-            "preco": [120, 240, 180, 320, 280, 150, 350, 210, 260, 190],
-            "complexidade": [1, 2, 1, 3, 2, 1, 3, 2, 2, 1],
-            "canal_digital": [0, 1, 1, 1, 0, 0, 1, 1, 0, 1],
-            "contratou": [0, 1, 0, 1, 1, 0, 1, 1, 0, 1],
-            "cidade": [
-                "Sao Paulo",
-                "Campinas",
-                "Sao Paulo",
-                "Rio de Janeiro",
-                "Curitiba",
-                "Santos",
-                "Belo Horizonte",
-                "Campinas",
-                "Recife",
-                "Porto Alegre",
-            ],
-        }
-    )
 
 
 def require_authentication():
@@ -335,21 +306,44 @@ def preprocess_df(raw_df):
     return df, original_cols, final_cols
 
 
-def read_uploaded_file(uploaded_file):
-    raw_bytes = uploaded_file.getvalue()
+def _detect_csv_sep(uploaded_file):
+    uploaded_file.seek(0)
+    text_sample = uploaded_file.read(8192).decode("utf-8", errors="ignore")
+    uploaded_file.seek(0)
+    try:
+        dialect = csv.Sniffer().sniff(text_sample, delimiters=[",", ";", "\t", "|"])
+        return dialect.delimiter
+    except Exception:
+        return ";" if text_sample.count(";") > text_sample.count(",") else ","
+
+
+def read_uploaded_file(uploaded_file, nrows=None):
     name = uploaded_file.name.lower()
-
     if name.endswith(".csv"):
-        text_sample = raw_bytes[:8192].decode("utf-8", errors="ignore")
-        try:
-            dialect = csv.Sniffer().sniff(text_sample, delimiters=[",", ";", "\t", "|"])
-            sep = dialect.delimiter
-        except Exception:
-            sep = ";" if text_sample.count(";") > text_sample.count(",") else ","
+        sep = _detect_csv_sep(uploaded_file)
+        df = pd.read_csv(uploaded_file, sep=sep, nrows=nrows, low_memory=False)
+        uploaded_file.seek(0)
+        return df
+    df = pd.read_excel(uploaded_file, nrows=nrows)
+    uploaded_file.seek(0)
+    return df
 
-        return pd.read_csv(io.BytesIO(raw_bytes), sep=sep)
 
-    return pd.read_excel(io.BytesIO(raw_bytes))
+def iter_uploaded_csv_chunks(uploaded_file, chunksize=100_000):
+    sep = _detect_csv_sep(uploaded_file)
+    for chunk in pd.read_csv(uploaded_file, sep=sep, chunksize=chunksize, low_memory=False):
+        yield chunk
+    uploaded_file.seek(0)
+
+
+def compute_upload_hash(files):
+    if not files:
+        return ""
+    h = hashlib.sha256()
+    for f in sorted(files, key=lambda x: x.name.lower()):
+        h.update(f.name.encode("utf-8", errors="ignore"))
+        h.update(str(getattr(f, "size", 0)).encode("utf-8", errors="ignore"))
+    return h.hexdigest()
 
 
 def upsert_hub(base_df, new_df, key_col):
@@ -532,13 +526,31 @@ if "upload_attempted" not in st.session_state:
     st.session_state.upload_attempted = False
 if "auto_run_ml" not in st.session_state:
     st.session_state.auto_run_ml = False
-if "hub_df" not in st.session_state:
-    _df_disk, _key_disk = carregar_hub()
-    st.session_state.hub_df = _df_disk
-    st.session_state.hub_key = _key_disk
+if "last_processed_hash" not in st.session_state:
+    st.session_state.last_processed_hash = ""
+if "last_update_at" not in st.session_state:
+    st.session_state.last_update_at = "-"
+if "hub_total_rows" not in st.session_state:
+    st.session_state.hub_total_rows = 0
+if "large_mode_active" not in st.session_state:
+    st.session_state.large_mode_active = False
+if st.session_state.get("app_schema_version") != APP_SCHEMA_VERSION:
+    if HUB_FILE.exists():
+        HUB_FILE.unlink()
+    if HUB_KEY_FILE.exists():
+        HUB_KEY_FILE.unlink()
+    st.session_state.hub_df = pd.DataFrame()
+    st.session_state.hub_key = "id_cliente"
+    st.session_state.upload_attempted = False
+    st.session_state.last_processed_hash = ""
+    st.session_state.last_update_at = "-"
+    st.session_state.hub_total_rows = 0
+    st.session_state.large_mode_active = False
+    st.session_state.app_schema_version = APP_SCHEMA_VERSION
 
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.markdown("## 📊 ML Insights Hub")
+st.sidebar.caption(f"Build: {APP_SCHEMA_VERSION}")
 st.sidebar.markdown("---")
 
 # ── Upload ────────────────────────────────────────────────────
@@ -549,20 +561,28 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True,
     label_visibility="collapsed",
 )
+current_upload_hash = compute_upload_hash(uploaded_files)
+total_upload_mb = (sum(getattr(f, "size", 0) for f in uploaded_files) / (1024 * 1024)) if uploaded_files else 0
+large_mode = total_upload_mb >= LARGE_FILE_THRESHOLD_MB
+if large_mode:
+    st.sidebar.warning(
+        f"Arquivo grande detectado ({total_upload_mb:.1f} MB). "
+        "Modo robusto por chunks ativado."
+    )
 
 # ── Config automática baseada no primeiro arquivo ou hub ──────
 _has_hub = not st.session_state.hub_df.empty
 
 if uploaded_files:
     try:
-        _raw_prev = read_uploaded_file(uploaded_files[0])
+        _preview_rows = 5000 if large_mode else None`n        _raw_prev = read_uploaded_file(uploaded_files[0], nrows=_preview_rows)
         _df_cfg, _, _ = preprocess_df(_raw_prev)
     except Exception:
-        _df_cfg = st.session_state.hub_df.copy() if _has_hub else build_demo_hub()
+        _df_cfg = st.session_state.hub_df.copy()
 elif _has_hub:
     _df_cfg = st.session_state.hub_df.copy()
 else:
-    _df_cfg = build_demo_hub()
+    _df_cfg = pd.DataFrame()
 
 _num_cfg = _df_cfg.select_dtypes(include=np.number).columns.tolist()
 _all_cfg = _df_cfg.columns.tolist()
@@ -625,7 +645,7 @@ _can_analyze = (bool(uploaded_files) or _has_hub) and _cfg_has_columns
 rodar = st.session_state.pop("auto_run_ml", False)
 
 analisar_tudo = st.sidebar.button(
-    "▶ Analisar Tudo",
+    "▶ Atualizar Dashboard",
     type="primary",
     use_container_width=True,
     disabled=not _can_analyze,
@@ -638,6 +658,10 @@ if not _can_analyze:
 elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
+# ── Auto-refresh por hash ─────────────────────────────────────
+if uploaded_files and current_upload_hash and current_upload_hash != st.session_state.get("last_processed_hash", ""):
+    st.sidebar.info("Arquivo novo detectado. Clique em **Atualizar Dashboard** para processar.")
+
 # ── Lógica do botão ───────────────────────────────────────────
 if analisar_tudo and uploaded_files:
     st.session_state.upload_attempted = True
@@ -647,7 +671,13 @@ if analisar_tudo and uploaded_files:
         ignored_count = 0
         for f in uploaded_files:
             try:
-                raw = read_uploaded_file(f)
+                if large_mode and f.name.lower().endswith(".csv"):
+                    raw_parts = []
+                    for chunk in iter_uploaded_csv_chunks(f):
+                        raw_parts.append(chunk)
+                    raw = pd.concat(raw_parts, ignore_index=True) if raw_parts else pd.DataFrame()
+                else:
+                    raw = read_uploaded_file(f)
             except Exception as _e:
                 st.sidebar.error(f"Erro ao ler {f.name}: {_e}")
                 continue
@@ -679,6 +709,10 @@ if analisar_tudo and uploaded_files:
 
         rows_after = len(hub)
         st.session_state.hub_df = hub
+        st.session_state.hub_total_rows = rows_after
+        st.session_state.large_mode_active = large_mode
+        st.session_state.last_processed_hash = current_upload_hash
+        st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         salvar_hub(hub, st.session_state.get("hub_key", key_col))
     if processed_count == 0 or rows_after == 0:
         st.sidebar.error(
@@ -711,43 +745,17 @@ if st.session_state.confirm_limpar:
         st.session_state.confirm_limpar = False
         st.rerun()
 
-with st.sidebar.expander("🔄 Restaurar hub salvo"):
-    hub_restore = st.file_uploader(
-        "hub_dados.parquet",
-        type=["parquet"],
-        key="hub_restore",
-        label_visibility="collapsed",
-    )
-    if hub_restore is not None:
-        try:
-            _restored = pd.read_parquet(hub_restore)
-            st.session_state.hub_df = _restored
-            salvar_hub(_restored, st.session_state.get("hub_key", "id_cliente"))
-            st.success(f"✅ {len(_restored)} registros restaurados!")
-            st.rerun()
-        except Exception as _re:
-            st.error(f"Erro ao restaurar: {_re}")
+
 
 # ── Estado do hub ─────────────────────────────────────────────
 df = st.session_state.hub_df.copy()
-is_demo_mode = False
-if df.empty and not st.session_state.get("upload_attempted", False):
-    df = build_demo_hub()
-    is_demo_mode = True
 
-# ── Banner modo demo ─────────────────────────────────────────
-if is_demo_mode:
-    st.markdown("""
-    <div style="background:#1e2530;border:2px dashed #2d3748;border-radius:12px;
-                padding:32px;text-align:center;margin-bottom:24px;">
-        <div style="font-size:48px;margin-bottom:12px;">📊</div>
-        <h3 style="color:#fafafa;font-weight:700;margin-bottom:8px;">Nenhum dado carregado ainda</h3>
-        <p style="color:#a6a9b6;font-size:14px;margin-bottom:4px;">
-            Carregue sua primeira planilha na barra lateral para começar a análise.<br>
-            <span style="color:#6b7280;">Abaixo você vê uma demonstração com dados de exemplo.</span>
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+# ── Banner estado vazio (sem dados de demo) ──────────────────
+if df.empty:
+    st.info("📂 Nenhum dado carregado. Arraste sua planilha na barra lateral para iniciar a análise.")
+    if st.session_state.get("last_update_at", "-") != "-":
+        st.caption(f"Último processamento: {st.session_state.last_update_at}")
+    st.stop()
 
 # ─────────────────────────────────────────────
 # DASHBOARD
@@ -765,7 +773,8 @@ missing_total = int(df.isnull().sum().sum())
 missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
 
 kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
-kpi_1.metric("👥 Clientes Analisados", f"{df.shape[0]:,}")
+_total_display = st.session_state.get("hub_total_rows") or df.shape[0]
+kpi_1.metric("👥 Clientes Analisados", f"{_total_display:,}")
 kpi_2.metric("📊 Variaveis de Analise", f"{df.shape[1]:,}")
 kpi_3.metric("⚠️ Dados Incompletos", f"{missing_total:,}")
 kpi_4.metric("✅ Qualidade dos Dados", f"{100 - missing_pct:.1f}%")
