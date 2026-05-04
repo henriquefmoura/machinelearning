@@ -35,6 +35,11 @@ import re
 import os
 import io
 from pathlib import Path
+try:
+    import pydeck as pdk
+    _PYDECK_OK = True
+except ImportError:
+    _PYDECK_OK = False
 
 def inject_custom_css():
     st.markdown("""
@@ -151,7 +156,7 @@ try:
 except Exception:
     IS_CLOUD = False
 
-APP_SCHEMA_VERSION = "2026-05-04-v7"
+APP_SCHEMA_VERSION = "2026-05-04-v8"
 LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
@@ -579,6 +584,138 @@ def ai_insights_openai(api_key, model_name, user_prompt, summary):
     except Exception:
         return "Nao foi possivel extrair resposta textual da API."
 
+
+# ── Geocodificacao e Mapa ─────────────────────────────────────────────────────
+def detect_geo_columns(df):
+    """Detecta colunas de lat/lon, CEP, rua e dados de endereco no dataframe."""
+    cl = {c: normalize_name(c) for c in df.columns}
+    lat_col = next((c for c, l in cl.items() if l in {"lat", "latitude"}), None)
+    lon_col = next((c for c, l in cl.items() if l in {"lon", "lng", "longitude", "long"}), None)
+    cep_col = next((c for c, l in cl.items() if l in {"cep", "cod_postal", "codigo_postal", "zip", "zip_code"}
+                    or "cep" in l), None)
+    rua_col = next((c for c, l in cl.items() if l in {"rua", "logradouro", "endereco", "enderezo", "street", "address"}), None)
+    nome_col = next((c for c, l in cl.items() if l in {"nome", "nome_cliente", "razao_social", "cliente", "name"}), None)
+    bairro_col = next((c for c, l in cl.items() if l in {"bairro", "neighborhood", "distrito"}), None)
+    cidade_col = next((c for c, l in cl.items() if l in {"cidade", "municipio", "city"}), None)
+    estado_col = next((c for c, l in cl.items() if l in {"estado", "uf", "state"}), None)
+    return lat_col, lon_col, cep_col, rua_col, nome_col, bairro_col, cidade_col, estado_col
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def geocode_ceps(ceps_tuple: tuple) -> dict:
+    """Geocodifica CEPs via BrasilAPI. Retorna {cep_8dig: {lat, lon, rua, bairro, cidade, estado}}."""
+    resultado = {}
+    for cep in ceps_tuple:
+        cep_clean = re.sub(r"[^0-9]", "", str(cep))[:8]
+        if len(cep_clean) != 8:
+            continue
+        try:
+            resp = requests.get(
+                f"https://brasilapi.com.br/api/cep/v2/{cep_clean}",
+                timeout=6,
+                headers={"User-Agent": "MLInsightsHub/1.0"},
+            )
+            if resp.ok:
+                d = resp.json()
+                loc = d.get("location") or {}
+                coords = loc.get("coordinates") or {}
+                lat = coords.get("latitude")
+                lon = coords.get("longitude")
+                if lat and lon:
+                    resultado[cep_clean] = {
+                        "lat": float(lat),
+                        "lon": float(lon),
+                        "rua": str(d.get("street") or ""),
+                        "bairro": str(d.get("neighborhood") or ""),
+                        "cidade": str(d.get("city") or ""),
+                        "estado": str(d.get("state") or ""),
+                    }
+        except Exception:
+            pass
+    return resultado
+
+
+def _render_map(map_df: pd.DataFrame, cat_cols_avail: list):
+    """Renderiza mapa interativo ScatterplotLayer (pydeck/CARTO) ou fallback st.map."""
+    MAX_MAP_ROWS = 3_000
+    if len(map_df) > MAX_MAP_ROWS:
+        st.warning(f"Exibindo amostra de {MAX_MAP_ROWS:,} de {len(map_df):,} pontos para performance.")
+        map_df = map_df.sample(MAX_MAP_ROWS, random_state=42).reset_index(drop=True)
+    else:
+        map_df = map_df.reset_index(drop=True)
+
+    # Colorir por categoria
+    color_col = None
+    _avail = [c for c in cat_cols_avail if c in map_df.columns]
+    if _avail:
+        _color_sel = st.selectbox("Colorir pontos por", ["(nenhum)"] + _avail, key="map_color")
+        if _color_sel != "(nenhum)":
+            color_col = _color_sel
+
+    _palette = [
+        (78, 140, 255), (244, 162, 97), (46, 204, 113), (231, 76, 60),
+        (155, 89, 182), (26, 188, 156), (243, 156, 18), (52, 152, 219),
+    ]
+
+    map_df = map_df.copy()
+    if color_col and color_col in map_df.columns:
+        _cats = map_df[color_col].astype(str).unique().tolist()[:8]
+        _cmap = {c: _palette[i % len(_palette)] for i, c in enumerate(_cats)}
+        _colors = [_cmap.get(str(v), (128, 128, 128)) for v in map_df[color_col]]
+        st.markdown("**Legenda:** " + " \u2502 ".join(f"\u25cf {c}" for c in _cats))
+    else:
+        _colors = [(78, 140, 255)] * len(map_df)
+
+    map_df["__r"] = [c[0] for c in _colors]
+    map_df["__g"] = [c[1] for c in _colors]
+    map_df["__b"] = [c[2] for c in _colors]
+
+    _tip_fields = [c for c in ["nome", "rua", "bairro", "cidade", "estado"] if c in map_df.columns]
+    if color_col and color_col in map_df.columns and color_col not in _tip_fields:
+        _tip_fields = [color_col] + _tip_fields
+    _tip_html = "<br>".join(
+        f"<b>{f.replace('_',' ').title()}:</b> {{{f}}}" for f in _tip_fields
+    ) or "<b>Lat:</b> {lat}<br><b>Lon:</b> {lon}"
+
+    if _PYDECK_OK:
+        try:
+            _layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=map_df,
+                get_position=["lon", "lat"],
+                get_color=["__r", "__g", "__b", 210],
+                get_radius=120,
+                pickable=True,
+                auto_highlight=True,
+            )
+            _view = pdk.ViewState(
+                latitude=float(map_df["lat"].mean()),
+                longitude=float(map_df["lon"].mean()),
+                zoom=11, pitch=0,
+            )
+            _deck = pdk.Deck(
+                layers=[_layer],
+                initial_view_state=_view,
+                tooltip={
+                    "html": _tip_html,
+                    "style": {"color": "white", "backgroundColor": "#1e2530", "padding": "8px"},
+                },
+                map_provider="carto",
+                map_style="dark",
+            )
+            st.pydeck_chart(_deck, use_container_width=True)
+        except Exception as _pdk_err:
+            st.warning(f"pydeck indisponivel ({_pdk_err}). Usando mapa simples.")
+            st.map(map_df[["lat", "lon"]])
+    else:
+        st.map(map_df[["lat", "lon"]])
+
+    _show = [c for c in ["nome", "rua", "bairro", "cidade", "estado", "lat", "lon"] if c in map_df.columns]
+    if _show:
+        with st.expander("📋 Ver tabela de endereços plotados"):
+            st.dataframe(map_df[_show].reset_index(drop=True), use_container_width=True)
+
+
 # ── Estado inicial ───────────────────────────────────────────
 if "confirm_limpar" not in st.session_state:
     st.session_state.confirm_limpar = False
@@ -676,6 +813,90 @@ def _detect_tipo(df_d, tgt):
 
 _auto_tipo_str = _detect_tipo(_df_cfg, _auto_target)
 _tipo_opts = ["Classificacao (sim/nao)", "Regressao (valor numerico)", "Clustering (agrupamento)"]
+
+# ── JOIN de planilhas (visivel quando 2+ arquivos enviados) ───
+if uploaded_files and len(uploaded_files) >= 2:
+    with st.sidebar.expander("🔗 Cruzar planilhas (JOIN)", expanded=False):
+        st.caption(
+            "Una dados de duas planilhas pela coluna em comum, "
+            "mesmo que as colunas tenham nomes diferentes nas duas."
+        )
+        _jnames = [f.name for f in uploaded_files]
+        _ja_name = st.selectbox("Planilha base (A)", _jnames, index=0, key="join_fa")
+        _jb_name = st.selectbox("Planilha para juntar (B)", _jnames,
+                                 index=min(1, len(_jnames) - 1), key="join_fb")
+
+        if _ja_name != _jb_name:
+            try:
+                _fa = next(f for f in uploaded_files if f.name == _ja_name)
+                _fb = next(f for f in uploaded_files if f.name == _jb_name)
+                _prev_a, _, _ = preprocess_df(read_uploaded_file(_fa, nrows=500))
+                _prev_b, _, _ = preprocess_df(read_uploaded_file(_fb, nrows=500))
+                _cols_a = _prev_a.columns.tolist()
+                _cols_b = _prev_b.columns.tolist()
+
+                _jca = st.selectbox("Chave em A", _cols_a, key="join_ka")
+                _jcb = st.selectbox(
+                    "Chave em B",
+                    _cols_b,
+                    index=(_cols_b.index(_jca) if _jca in _cols_b else 0),
+                    key="join_kb",
+                )
+                _jtype = st.radio(
+                    "Tipo de JOIN",
+                    ["left", "inner", "outer"],
+                    format_func=lambda x: {
+                        "left": "LEFT — mantém todos de A",
+                        "inner": "INNER — só registros comuns",
+                        "outer": "OUTER — todos os registros",
+                    }[x],
+                    key="join_type",
+                )
+                _cols_excl = st.multiselect(
+                    "Colunas de B para ignorar (evitar duplicatas)",
+                    [c for c in _cols_b if c != _jcb],
+                    key="join_excl",
+                )
+
+                # Previa do resultado
+                if st.checkbox("Previa do resultado (5 linhas)", key="join_prev"):
+                    if _jca != _jcb:
+                        _prev_b2 = _prev_b.rename(columns={_jcb: _jca})
+                    else:
+                        _prev_b2 = _prev_b.copy()
+                    _excl_m = [canonical_column(c) for c in _cols_excl]
+                    _prev_b2 = _prev_b2.drop(columns=_excl_m, errors="ignore")
+                    _ov = [c for c in _prev_b2.columns if c in _prev_a.columns and c != _jca]
+                    _prev_b2 = _prev_b2.drop(columns=_ov, errors="ignore")
+                    _prev_join = _prev_a.merge(_prev_b2, on=_jca, how=_jtype)
+                    st.dataframe(_prev_join.head(5), use_container_width=True)
+
+                if st.button("🔗 Aplicar JOIN no Hub", key="do_join", use_container_width=True):
+                    with st.spinner("Aplicando JOIN..."):
+                        _fa.seek(0)
+                        _fb.seek(0)
+                        _full_a, _, _ = preprocess_df(read_uploaded_file(_fa))
+                        _full_b, _, _ = preprocess_df(read_uploaded_file(_fb))
+                        if _jca != _jcb:
+                            _full_b = _full_b.rename(columns={_jcb: _jca})
+                        _excl_mapped = [canonical_column(c) for c in _cols_excl]
+                        _full_b = _full_b.drop(columns=_excl_mapped, errors="ignore")
+                        _overlap = [c for c in _full_b.columns if c in _full_a.columns and c != _jca]
+                        _full_b = _full_b.drop(columns=_overlap, errors="ignore")
+                        _joined = _full_a.merge(_full_b, on=_jca, how=_jtype)
+                        if len(_joined) > MAX_DASHBOARD_ROWS:
+                            _joined = _joined.sample(MAX_DASHBOARD_ROWS, random_state=42).reset_index(drop=True)
+                        st.session_state.hub_df = _joined
+                        st.session_state.hub_key = _jca
+                        st.session_state.hub_total_rows = len(_joined)
+                        st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                        salvar_hub(_joined, _jca)
+                    st.success(f"✅ JOIN aplicado: {len(_joined):,} registros.")
+                    st.rerun()
+            except Exception as _je:
+                st.error(f"Erro no JOIN: {_je}")
+        else:
+            st.warning("Selecione planilhas diferentes para fazer o JOIN.")
 
 # ── Configurações avançadas (expander) ───────────────────────
 with st.sidebar.expander("⚙️ Configurações avançadas (opcional)"):
@@ -915,10 +1136,11 @@ kpi_2.metric("📊 Variaveis de Analise", f"{df.shape[1]:,}")
 kpi_3.metric("⚠️ Dados Incompletos", f"{missing_total:,}")
 kpi_4.metric("✅ Qualidade dos Dados", f"{100 - missing_pct:.1f}%")
 
-tab_overview, tab_profile, tab_rel, tab_export = st.tabs([
+tab_overview, tab_profile, tab_rel, tab_mapa, tab_export = st.tabs([
     "📋 Visao Geral",
     "📊 Perfil dos Dados",
     "🔗 Relacoes e Tendencias",
+    "🗺️ Mapa de Clientes",
     "💾 Exportacao",
 ])
 
@@ -1055,6 +1277,159 @@ with tab_rel:
             gc.collect()
         except Exception:
             st.info("Coluna de data encontrada, mas não foi possível interpretar os valores.")
+
+with tab_mapa:
+    st.markdown("#### 🗺️ Mapa de Clientes por Endereço")
+    st.caption(
+        "Localiza cada cliente como um ponto no mapa até o nível de rua. "
+        "O app detecta automaticamente colunas de lat/lon, CEP ou permite configuração manual."
+    )
+
+    _lat_c, _lon_c, _cep_c, _rua_c, _nome_c, _bairro_c, _cidade_c, _estado_c = detect_geo_columns(df_view)
+
+    def _build_point_df(base_df, lat_col, lon_col):
+        m = pd.DataFrame()
+        m["lat"] = pd.to_numeric(base_df[lat_col], errors="coerce")
+        m["lon"] = pd.to_numeric(base_df[lon_col], errors="coerce")
+        for col_name, col_src in [
+            ("nome", _nome_c), ("rua", _rua_c), ("bairro", _bairro_c),
+            ("cidade", _cidade_c), ("estado", _estado_c),
+        ]:
+            if col_src and col_src in base_df.columns:
+                m[col_name] = base_df[col_src].astype(str).values
+        return m.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+
+    # ── Estratégia 1: colunas lat/lon detectadas automaticamente ──
+    if _lat_c and _lon_c:
+        st.success(f"✅ Coordenadas detectadas: **{_lat_c}** / **{_lon_c}**")
+        _map_df = _build_point_df(df_view, _lat_c, _lon_c)
+        if not _map_df.empty:
+            st.markdown(f"**{len(_map_df):,} clientes** com coordenadas válidas.")
+            _render_map(_map_df, cat_cols_chart)
+        else:
+            st.warning("Colunas lat/lon encontradas, mas sem valores válidos.")
+
+    # ── Estratégia 2: coluna CEP → BrasilAPI (gratuito, sem chave) ──
+    elif _cep_c:
+        st.info(f"📮 Coluna de CEP detectada: **{_cep_c}**")
+        _raw_ceps = df_view[_cep_c].dropna().astype(str)
+        _clean_ceps_set = set(re.sub(r"[^0-9]", "", c)[:8] for c in _raw_ceps)
+        _valid_ceps = tuple(sorted(c for c in _clean_ceps_set if len(c) == 8))
+
+        if not _valid_ceps:
+            st.error("Nenhum CEP com 8 dígitos encontrado. Verifique a formatação (ex: 01310-100 ou 01310100).")
+        else:
+            _n_ceps = len(_valid_ceps)
+            st.markdown(
+                f"**{_n_ceps} CEPs únicos** encontrados. "
+                "Geocodificação via **BrasilAPI** (gratuita, sem necessidade de chave)."
+            )
+            _ceps_to_geo = _valid_ceps[:300]
+            if _n_ceps > 300:
+                st.warning(f"Muitos CEPs únicos ({_n_ceps}). Geocodificando os primeiros 300.")
+
+            if st.button("📍 Geocodificar e Plotar no Mapa", key="btn_geo_cep", use_container_width=True):
+                with st.spinner(f"Geocodificando {len(_ceps_to_geo)} CEPs…"):
+                    _geo_result = geocode_ceps(_ceps_to_geo)
+                st.session_state["_geo_cep_cache"] = _geo_result
+                st.rerun()
+
+            if st.session_state.get("_geo_cep_cache"):
+                _geo = st.session_state["_geo_cep_cache"]
+                _cep_norm = df_view[_cep_c].astype(str).apply(
+                    lambda x: re.sub(r"[^0-9]", "", x)[:8]
+                )
+                _map_rows = []
+                for _idx in df_view.index:
+                    _k = _cep_norm.loc[_idx]
+                    _g = _geo.get(_k)
+                    if not _g:
+                        continue
+                    _row = {"lat": _g["lat"], "lon": _g["lon"]}
+                    _row["rua"] = (
+                        str(df_view.at[_idx, _rua_c]) if _rua_c and _rua_c in df_view.columns
+                        else _g.get("rua", "")
+                    )
+                    _row["bairro"] = _g.get("bairro", "")
+                    _row["cidade"] = _g.get("cidade", "")
+                    _row["estado"] = _g.get("estado", "")
+                    if _nome_c and _nome_c in df_view.columns:
+                        _row["nome"] = str(df_view.at[_idx, _nome_c])
+                    for _cc in cat_cols_chart:
+                        if _cc in df_view.columns:
+                            _row[_cc] = df_view.at[_idx, _cc]
+                    _map_rows.append(_row)
+
+                if _map_rows:
+                    _map_df = pd.DataFrame(_map_rows)
+                    st.success(f"✅ {len(_map_df):,} registros plotados ({len(_geo)} CEPs resolvidos de {_n_ceps} únicos).")
+                    _render_map(_map_df, cat_cols_chart)
+                else:
+                    st.error("Nenhum registro pôde ser geocodificado. BrasilAPI pode não ter coordenadas para esses CEPs.")
+
+    # ── Estratégia 3: seleção manual de colunas ──
+    else:
+        st.warning("Nenhuma coluna de lat/lon ou CEP detectada automaticamente.")
+        st.markdown("**Configure as colunas de endereço para plotar o mapa:**")
+        _mc1, _mc2 = st.columns(2)
+        _all_map_cols = ["(nenhuma)"] + df_view.columns.tolist()
+        _sel_lat = _mc1.selectbox("Coluna Latitude", _all_map_cols, key="man_lat")
+        _sel_lon = _mc2.selectbox("Coluna Longitude", _all_map_cols, key="man_lon")
+        _sel_cep = _mc1.selectbox("Coluna CEP (alternativa)", _all_map_cols, key="man_cep")
+        _sel_rua = _mc2.selectbox("Coluna Rua/Logradouro (tooltip)", _all_map_cols, key="man_rua")
+
+        if _sel_lat != "(nenhuma)" and _sel_lon != "(nenhuma)":
+            _map_df = pd.DataFrame()
+            _map_df["lat"] = pd.to_numeric(df_view[_sel_lat], errors="coerce")
+            _map_df["lon"] = pd.to_numeric(df_view[_sel_lon], errors="coerce")
+            if _sel_rua != "(nenhuma)":
+                _map_df["rua"] = df_view[_sel_rua].astype(str).values
+            if _nome_c and _nome_c in df_view.columns:
+                _map_df["nome"] = df_view[_nome_c].astype(str).values
+            _map_df = _map_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+            if not _map_df.empty:
+                _render_map(_map_df, cat_cols_chart)
+            else:
+                st.error("Nenhum valor numérico válido nas colunas de lat/lon selecionadas.")
+
+        elif _sel_cep != "(nenhuma)":
+            _raw_m = df_view[_sel_cep].dropna().astype(str)
+            _valid_m = tuple(sorted(set(
+                c for c in (_raw_m.apply(lambda x: re.sub(r"[^0-9]", "", x)[:8]))
+                if len(c) == 8
+            )))[:300]
+            if st.button("📍 Geocodificar por CEP", key="btn_geo_man", use_container_width=True):
+                with st.spinner(f"Geocodificando {len(_valid_m)} CEPs…"):
+                    _geo_m = geocode_ceps(_valid_m)
+                st.session_state["_geo_man_cache"] = {
+                    "geo": _geo_m, "cep_col": _sel_cep, "rua_col": _sel_rua
+                }
+                st.rerun()
+
+            if st.session_state.get("_geo_man_cache"):
+                _mc_data = st.session_state["_geo_man_cache"]
+                _geo_m = _mc_data["geo"]
+                _cep_c2 = _mc_data["cep_col"]
+                _rua_c2 = _mc_data["rua_col"]
+                _cep_n2 = df_view[_cep_c2].astype(str).apply(lambda x: re.sub(r"[^0-9]", "", x)[:8])
+                _map_rows2 = []
+                for _idx in df_view.index:
+                    _g = _geo_m.get(_cep_n2.loc[_idx])
+                    if not _g:
+                        continue
+                    _row = {"lat": _g["lat"], "lon": _g["lon"],
+                            "rua": (str(df_view.at[_idx, _rua_c2]) if _rua_c2 != "(nenhuma)" and _rua_c2 in df_view.columns
+                                    else _g.get("rua", "")),
+                            "bairro": _g.get("bairro", ""),
+                            "cidade": _g.get("cidade", ""),
+                            "estado": _g.get("estado", "")}
+                    _map_rows2.append(_row)
+                if _map_rows2:
+                    _render_map(pd.DataFrame(_map_rows2), cat_cols_chart)
+                else:
+                    st.error("Nenhum CEP geocodificado. Verifique se os CEPs são válidos.")
+        else:
+            st.info("Selecione colunas de lat/lon ou CEP acima para visualizar o mapa.")
 
 with tab_export:
     st.markdown("#### Exportar base consolidada")
