@@ -149,8 +149,8 @@ try:
 except Exception:
     IS_CLOUD = False
 
-APP_SCHEMA_VERSION = "2026-05-04-v4"
-LARGE_FILE_THRESHOLD_MB = 300
+APP_SCHEMA_VERSION = "2026-05-04-v5"
+LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
 
@@ -306,8 +306,11 @@ def preprocess_df(raw_df):
     return df, original_cols, final_cols
 
 
-def _detect_csv_sep_bytes(raw_bytes):
-    text_sample = raw_bytes[:8192].decode("utf-8", errors="ignore")
+def _detect_csv_sep(uploaded_file):
+    uploaded_file.seek(0)
+    sample = uploaded_file.read(8192)
+    uploaded_file.seek(0)
+    text_sample = sample.decode("utf-8", errors="ignore") if isinstance(sample, (bytes, bytearray)) else str(sample)
     try:
         dialect = csv.Sniffer().sniff(text_sample, delimiters=[",", ";", "\t", "|"])
         return dialect.delimiter
@@ -316,19 +319,24 @@ def _detect_csv_sep_bytes(raw_bytes):
 
 
 def read_uploaded_file(uploaded_file, nrows=None):
-    raw_bytes = uploaded_file.getvalue()
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
-        sep = _detect_csv_sep_bytes(raw_bytes)
-        return pd.read_csv(io.BytesIO(raw_bytes), sep=sep, nrows=nrows, low_memory=False)
+        sep = _detect_csv_sep(uploaded_file)
+        df = pd.read_csv(uploaded_file, sep=sep, nrows=nrows, low_memory=False)
+        uploaded_file.seek(0)
+        return df
+    # Para Excel, ainda precisa carregar o arquivo inteiro em memoria (openpyxl).
+    raw_bytes = uploaded_file.getvalue()
     return pd.read_excel(io.BytesIO(raw_bytes), nrows=nrows)
 
 
 def iter_uploaded_csv_chunks(uploaded_file, chunksize=100_000):
-    raw_bytes = uploaded_file.getvalue()
-    sep = _detect_csv_sep_bytes(raw_bytes)
-    for chunk in pd.read_csv(io.BytesIO(raw_bytes), sep=sep, chunksize=chunksize, low_memory=False):
-        yield chunk
+    sep = _detect_csv_sep(uploaded_file)
+    try:
+        for chunk in pd.read_csv(uploaded_file, sep=sep, chunksize=chunksize, low_memory=False):
+            yield chunk
+    finally:
+        uploaded_file.seek(0)
 
 
 def compute_upload_hash(files):
@@ -600,6 +608,7 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True,
     label_visibility="collapsed",
 )
+st.sidebar.caption("Formato recomendado: CSV UTF-8 (separador ',' ou ';'), sem formulas, em lotes <= 200 MB.")
 current_upload_hash = compute_upload_hash(uploaded_files)
 total_upload_mb = (sum(getattr(f, "size", 0) for f in uploaded_files) / (1024 * 1024)) if uploaded_files else 0
 large_mode = total_upload_mb >= LARGE_FILE_THRESHOLD_MB
