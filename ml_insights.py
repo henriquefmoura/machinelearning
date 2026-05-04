@@ -271,8 +271,13 @@ def canonical_column(col):
 def coerce_numeric_series(series):
     if pd.api.types.is_numeric_dtype(series):
         return series
+    # Converte tipo str nativo do Pandas 3.x para object antes de operar
+    try:
+        s = series.astype(object)
+    except Exception:
+        s = series
     cleaned = (
-        series.astype(str)
+        s.astype(str)
         .str.replace("R$", "", regex=False)
         .str.replace(" ", "", regex=False)
         .str.replace(".", "", regex=False)
@@ -320,6 +325,12 @@ def _detect_csv_sep(uploaded_file):
 
 def read_uploaded_file(uploaded_file, nrows=None):
     name = uploaded_file.name.lower()
+    if name.endswith(".parquet"):
+        raw_bytes = uploaded_file.getvalue()
+        df = pd.read_parquet(io.BytesIO(raw_bytes))
+        if nrows and len(df) > nrows:
+            df = df.head(nrows)
+        return df
     if name.endswith(".csv"):
         sep = _detect_csv_sep(uploaded_file)
         df = pd.read_csv(uploaded_file, sep=sep, nrows=nrows, low_memory=False)
@@ -631,10 +642,12 @@ _has_hub = not st.session_state.hub_df.empty
 
 if uploaded_files:
     try:
-        _preview_rows = 5000 if large_mode else None
+        _is_parquet_prev = uploaded_files[0].name.lower().endswith(".parquet")
+        _preview_rows = None if _is_parquet_prev else (5000 if large_mode else None)
         _raw_prev = read_uploaded_file(uploaded_files[0], nrows=_preview_rows)
         _df_cfg, _, _ = preprocess_df(_raw_prev)
-    except Exception:
+    except Exception as _prev_err:
+        print(f"[ML_INSIGHTS] preview error: {_prev_err}", flush=True)
         _df_cfg = st.session_state.hub_df.copy()
 elif _has_hub:
     _df_cfg = st.session_state.hub_df.copy()
