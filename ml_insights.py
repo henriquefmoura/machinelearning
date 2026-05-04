@@ -356,6 +356,24 @@ def upsert_hub(base_df, new_df, key_col):
     return merged.reset_index()
 
 
+def merge_clean_into_hub(hub, clean, preferred_key):
+    current_key = preferred_key if preferred_key in clean.columns else suggest_key_column(clean)
+
+    if current_key in clean.columns:
+        clean = clean.dropna(subset=[current_key])
+        valid_count = int(clean[current_key].notna().sum())
+        uniq_count = int(clean[current_key].nunique(dropna=True))
+        uniq_ratio = (uniq_count / max(1, valid_count)) if valid_count > 0 else 0
+        if valid_count > 0 and uniq_ratio >= 0.95:
+            clean = clean.drop_duplicates(subset=[current_key], keep="last")
+            hub = upsert_hub(hub, clean, current_key)
+            return hub, current_key
+
+    hub = pd.concat([hub, clean], ignore_index=True)
+    hub = hub.drop_duplicates(keep="last")
+    return hub, None
+
+
 def suggest_target(df):
     if df is None or len(df.columns) == 0:
         return "target"
@@ -668,10 +686,26 @@ if analisar_tudo and uploaded_files:
         for f in uploaded_files:
             try:
                 if large_mode and f.name.lower().endswith(".csv"):
-                    raw_parts = []
+                    file_had_rows = False
                     for chunk in iter_uploaded_csv_chunks(f):
-                        raw_parts.append(chunk)
-                    raw = pd.concat(raw_parts, ignore_index=True) if raw_parts else pd.DataFrame()
+                        clean, _, _ = preprocess_df(chunk)
+                        if clean.empty:
+                            continue
+                        file_had_rows = True
+                        hub, used_key = merge_clean_into_hub(hub, clean, key_col)
+                        if used_key:
+                            st.session_state.hub_key = used_key
+                    if file_had_rows:
+                        processed_count += 1
+                    else:
+                        ignored_count += 1
+                    continue
+                if large_mode and f.name.lower().endswith((".xlsx", ".xls")):
+                    st.sidebar.error(
+                        f"❌ {f.name}: Excel muito grande no modo robusto. "
+                        "Converta para CSV para processar sem queda."
+                    )
+                    continue
                 else:
                     raw = read_uploaded_file(f)
 
@@ -680,23 +714,9 @@ if analisar_tudo and uploaded_files:
                     ignored_count += 1
                     continue
 
-                current_key = key_col if key_col in clean.columns else suggest_key_column(clean)
-
-                if current_key in clean.columns:
-                    clean = clean.dropna(subset=[current_key])
-                    valid_count = int(clean[current_key].notna().sum())
-                    uniq_count = int(clean[current_key].nunique(dropna=True))
-                    uniq_ratio = (uniq_count / max(1, valid_count)) if valid_count > 0 else 0
-                    if valid_count > 0 and uniq_ratio >= 0.95:
-                        clean = clean.drop_duplicates(subset=[current_key], keep="last")
-                        hub = upsert_hub(hub, clean, current_key)
-                        st.session_state.hub_key = current_key
-                    else:
-                        hub = pd.concat([hub, clean], ignore_index=True)
-                        hub = hub.drop_duplicates(keep="last")
-                else:
-                    hub = pd.concat([hub, clean], ignore_index=True)
-                    hub = hub.drop_duplicates(keep="last")
+                hub, used_key = merge_clean_into_hub(hub, clean, key_col)
+                if used_key:
+                    st.session_state.hub_key = used_key
 
                 processed_count += 1
             except MemoryError:
@@ -759,11 +779,21 @@ if df.empty:
         st.caption(f"Último processamento: {st.session_state.last_update_at}")
     st.stop()
 
+# Em bases muito grandes, usa uma amostra para visualizacao e calculos de dashboard.
+if len(df) > MAX_DASHBOARD_ROWS:
+    df_view = df.sample(MAX_DASHBOARD_ROWS, random_state=42)
+    st.warning(
+        f"Base muito grande ({len(df):,} linhas). "
+        f"Dashboard exibindo amostra de {MAX_DASHBOARD_ROWS:,} linhas para estabilidade."
+    )
+else:
+    df_view = df
+
 # ─────────────────────────────────────────────
 # DASHBOARD
 # ─────────────────────────────────────────────
-numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-cat_cols = [c for c in df.columns if c not in numeric_cols and df[c].nunique() <= 30]
+numeric_cols = df_view.select_dtypes(include=np.number).columns.tolist()
+cat_cols = [c for c in df_view.columns if c not in numeric_cols and df_view[c].nunique() <= 30]
 
 st.markdown("## 📈 Dashboard Executivo")
 st.caption(
@@ -771,8 +801,8 @@ st.caption(
     "Use as abas abaixo para navegar entre os paineis."
 )
 
-missing_total = int(df.isnull().sum().sum())
-missing_pct = (missing_total / (max(1, df.shape[0] * df.shape[1]))) * 100
+missing_total = int(df_view.isnull().sum().sum())
+missing_pct = (missing_total / (max(1, df_view.shape[0] * df_view.shape[1]))) * 100
 
 kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
 _total_display = st.session_state.get("hub_total_rows") or df.shape[0]
@@ -793,11 +823,11 @@ with tab_overview:
     left, right = st.columns([1.4, 1])
     with left:
         st.markdown("#### Amostra dos dados")
-        st.dataframe(df.head(15), use_container_width=True)
+        st.dataframe(df_view.head(15), use_container_width=True)
     with right:
         st.markdown("#### Estatisticas descritivas")
         if numeric_cols:
-            summary = df[numeric_cols].describe().T[["mean", "std", "min", "max"]].round(2)
+            summary = df_view[numeric_cols].describe().T[["mean", "std", "min", "max"]].round(2)
             st.dataframe(summary, use_container_width=True)
         else:
             st.info("Nenhuma coluna numerica encontrada para estatisticas.")
@@ -807,8 +837,8 @@ with tab_overview:
         kpi_cols = numeric_cols[:6]
         kpi_grid = st.columns(len(kpi_cols))
         for i, c in enumerate(kpi_cols):
-            total = df[c].sum()
-            media = df[c].mean()
+            total = df_view[c].sum()
+            media = df_view[c].mean()
             kpi_grid[i].metric(
                 label=c.replace("_", " ").title(),
                 value=f"{media:,.2f}",
@@ -825,7 +855,7 @@ with tab_profile:
         fig_dist, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.4 * nrows))
         axes = np.array(axes).flatten() if n > 1 else [axes]
         for i, c in enumerate(numeric_cols):
-            axes[i].hist(df[c].dropna(), bins=20, color="#4e8cff", edgecolor="white", alpha=0.85)
+            axes[i].hist(df_view[c].dropna(), bins=20, color="#4e8cff", edgecolor="white", alpha=0.85)
             axes[i].set_title(c.replace("_", " ").title(), fontsize=10)
             axes[i].set_ylabel("Frequência")
         for j in range(i + 1, len(axes)):
@@ -838,7 +868,7 @@ with tab_profile:
         st.markdown("#### Distribuicao das categorias")
         ccol1, ccol2 = st.columns(2)
         for idx, c in enumerate(cat_cols[:6]):
-            vcounts = df[c].value_counts().head(12)
+            vcounts = df_view[c].value_counts().head(12)
             fig_cat, ax_cat = plt.subplots(figsize=(7, 3.2))
             ax_cat.barh(vcounts.index.astype(str), vcounts.values, color="#2ecc71", edgecolor="white")
             ax_cat.set_title(c.replace("_", " ").title(), fontsize=10)
@@ -856,7 +886,7 @@ with tab_rel:
     if len(numeric_cols) >= 2:
         st.markdown("#### Mapa de correlacao")
         st.caption("Valores proximos de +1 ou -1 indicam relacao forte. Proximos de 0 indicam independencia.")
-        corr = df[numeric_cols].corr(numeric_only=True)
+        corr = df_view[numeric_cols].corr(numeric_only=True)
         fig_corr, ax_corr = plt.subplots(figsize=(max(6, len(numeric_cols)), max(5, len(numeric_cols) - 1)))
         cax = ax_corr.matshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
         fig_corr.colorbar(cax)
@@ -880,24 +910,24 @@ with tab_rel:
 
         fig_sc, ax_sc = plt.subplots(figsize=(8.6, 4.8))
         if color_by != "Nenhum":
-            for grupo, sub in df.groupby(color_by):
+            for grupo, sub in df_view.groupby(color_by):
                 ax_sc.scatter(sub[col_x], sub[col_y], label=str(grupo), alpha=0.7, s=40)
             ax_sc.legend(title=color_by.replace("_", " ").title(), fontsize=8)
         else:
-            ax_sc.scatter(df[col_x], df[col_y], alpha=0.6, color="#9b59b6", s=40)
+            ax_sc.scatter(df_view[col_x], df_view[col_y], alpha=0.6, color="#9b59b6", s=40)
         ax_sc.set_xlabel(col_x.replace("_", " ").title())
         ax_sc.set_ylabel(col_y.replace("_", " ").title())
         fig_sc.tight_layout()
         st.pyplot(fig_sc)
         plt.close()
 
-    date_cols = [c for c in df.columns if "data" in c.lower() or "date" in c.lower() or "mes" in c.lower()]
+    date_cols = [c for c in df_view.columns if "data" in c.lower() or "date" in c.lower() or "mes" in c.lower()]
     if date_cols and numeric_cols:
         st.markdown("### Evolução temporal")
         dcol = date_cols[0]
         vcol = st.selectbox("Variável temporal", numeric_cols, key="ts_var")
         try:
-            df_ts = df[[dcol, vcol]].dropna().copy()
+            df_ts = df_view[[dcol, vcol]].dropna().copy()
             df_ts[dcol] = pd.to_datetime(df_ts[dcol], dayfirst=True, errors="coerce")
             df_ts = df_ts.dropna(subset=[dcol]).sort_values(dcol)
             df_ts_g = df_ts.groupby(dcol)[vcol].mean()
