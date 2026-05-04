@@ -149,7 +149,7 @@ try:
 except Exception:
     IS_CLOUD = False
 
-APP_SCHEMA_VERSION = "2026-05-04-v3"
+APP_SCHEMA_VERSION = "2026-05-04-v4"
 LARGE_FILE_THRESHOLD_MB = 300
 MAX_DASHBOARD_ROWS = 200_000
 
@@ -372,6 +372,32 @@ def merge_clean_into_hub(hub, clean, preferred_key):
     hub = pd.concat([hub, clean], ignore_index=True)
     hub = hub.drop_duplicates(keep="last")
     return hub, None
+
+
+def merge_clean_into_hub_sampled(hub, clean, preferred_key, cap_rows):
+    current_key = preferred_key if preferred_key in clean.columns else suggest_key_column(clean)
+
+    if current_key in clean.columns:
+        clean = clean.dropna(subset=[current_key])
+        clean = clean.drop_duplicates(subset=[current_key], keep="last")
+
+    if hub is None or hub.empty:
+        merged = clean.copy()
+    else:
+        all_cols = sorted(set(hub.columns).union(set(clean.columns)))
+        merged = pd.concat(
+            [hub.reindex(columns=all_cols), clean.reindex(columns=all_cols)],
+            ignore_index=True,
+        )
+        if current_key in merged.columns:
+            merged = merged.drop_duplicates(subset=[current_key], keep="last")
+        else:
+            merged = merged.drop_duplicates(keep="last")
+
+    if len(merged) > cap_rows:
+        merged = merged.sample(cap_rows, random_state=42)
+
+    return merged, (current_key if current_key in clean.columns else None)
 
 
 def suggest_target(df):
@@ -681,6 +707,8 @@ if analisar_tudo and uploaded_files:
     st.session_state.upload_attempted = True
     with st.spinner("⏳ Carregando e processando dados..."):
         hub = st.session_state.hub_df.copy()
+        rows_ingested = 0
+        base_total_rows = int(st.session_state.get("hub_total_rows") or len(hub))
         processed_count = 0
         ignored_count = 0
         for f in uploaded_files:
@@ -692,7 +720,13 @@ if analisar_tudo and uploaded_files:
                         if clean.empty:
                             continue
                         file_had_rows = True
-                        hub, used_key = merge_clean_into_hub(hub, clean, key_col)
+                        rows_ingested += len(clean)
+                        hub, used_key = merge_clean_into_hub_sampled(
+                            hub,
+                            clean,
+                            key_col,
+                            MAX_DASHBOARD_ROWS,
+                        )
                         if used_key:
                             st.session_state.hub_key = used_key
                     if file_had_rows:
@@ -714,6 +748,7 @@ if analisar_tudo and uploaded_files:
                     ignored_count += 1
                     continue
 
+                rows_ingested += len(clean)
                 hub, used_key = merge_clean_into_hub(hub, clean, key_col)
                 if used_key:
                     st.session_state.hub_key = used_key
@@ -731,7 +766,10 @@ if analisar_tudo and uploaded_files:
 
         rows_after = len(hub)
         st.session_state.hub_df = hub
-        st.session_state.hub_total_rows = rows_after
+        if large_mode:
+            st.session_state.hub_total_rows = base_total_rows + rows_ingested
+        else:
+            st.session_state.hub_total_rows = rows_after
         st.session_state.large_mode_active = large_mode
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -744,7 +782,13 @@ if analisar_tudo and uploaded_files:
         rodar = False
     else:
         st.session_state.auto_run_ml = True
-        st.sidebar.success(f"✅ Dashboard atualizado com {rows_after:,} registros.")
+        if large_mode:
+            st.sidebar.success(
+                f"✅ Dashboard atualizado. Total processado: {st.session_state.hub_total_rows:,} | "
+                f"Amostra em memória: {rows_after:,}."
+            )
+        else:
+            st.sidebar.success(f"✅ Dashboard atualizado com {rows_after:,} registros.")
         st.rerun()
 elif analisar_tudo and _has_hub:
     rodar = True
