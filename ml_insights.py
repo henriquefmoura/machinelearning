@@ -43,11 +43,15 @@ try:
 except ImportError:
     _DUCKDB_OK = False
 
+# Workaround para incompatibilidades protobuf em alguns ambientes (ex.: Streamlit Cloud)
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 try:
     import mlflow
     _MLFLOW_OK = True
-except ImportError:
+except Exception as _mlflow_exc:
+    mlflow = None
     _MLFLOW_OK = False
+    print(f"[ML_INSIGHTS] MLflow desativado: {_mlflow_exc}", flush=True)
 
 _TORCH_OK = False  # Lazy import — carrega sob demanda no bloco de ML
 try:
