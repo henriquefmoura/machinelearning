@@ -7,6 +7,9 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 import requests
 import json
 import hmac
@@ -1348,86 +1351,115 @@ with tab_overview:
 with tab_profile:
     st.markdown("Visualize como os dados se distribuem — ideal para identificar padroes, outliers e concentracoes.")
     if numeric_cols:
-        st.markdown("#### Distribuicao das variaveis numericas")
+        st.markdown("#### Distribuição das variáveis numéricas")
         n = len(numeric_cols_chart)
-        ncols = min(3, n)
+        ncols = min(2, n)
         nrows = (n + ncols - 1) // ncols
-        fig_dist, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.4 * nrows))
-        axes = np.array(axes).flatten() if n > 1 else [axes]
+        
+        _fig_dist = make_subplots(
+            rows=nrows, cols=ncols,
+            subplot_titles=[c.replace("_", " ").title() for c in numeric_cols_chart],
+            specs=[[{"secondary_y": False}] * ncols for _ in range(nrows)],
+        )
+        
         for i, c in enumerate(numeric_cols_chart):
-            axes[i].hist(df_view[c].dropna().values, bins=25, color="#4e8cff", edgecolor="white", alpha=0.85)
-            axes[i].set_title(c.replace("_", " ").title(), fontsize=10)
-            axes[i].set_ylabel("Frequência")
-        for j in range(i + 1, len(axes)):
-            axes[j].set_visible(False)
-        fig_dist.tight_layout()
-        st.pyplot(fig_dist)
-        plt.close(fig_dist)
-        del fig_dist, axes
+            row = (i // ncols) + 1
+            col = (i % ncols) + 1
+            _data = df_view[c].dropna().values
+            _fig_dist.add_trace(
+                go.Histogram(x=_data, nbinsx=25, name=c.replace("_", " "), 
+                            marker=dict(color="#4e8cff", opacity=0.8),
+                            hovertemplate="<b>%{x:.2f}</b><br>Frequência: %{y}<extra></extra>"),
+                row=row, col=col
+            )
+        
+        _fig_dist.update_xaxes(title_text="Valor", row=nrows, col=1)
+        _fig_dist.update_yaxes(title_text="Frequência", row=1, col=1)
+        _fig_dist.update_layout(height=350 * nrows, showlegend=False, hovermode="x unified")
+        st.plotly_chart(_fig_dist, use_container_width=True)
+        del _fig_dist
         gc.collect()
 
     if cat_cols:
-        st.markdown("#### Distribuicao das categorias")
-        ccol1, ccol2 = st.columns(2)
-        for idx, c in enumerate(cat_cols_chart):
-            vcounts = df_view[c].value_counts().head(10)
-            fig_cat, ax_cat = plt.subplots(figsize=(7, 3.2))
-            ax_cat.barh(vcounts.index.astype(str), vcounts.values, color="#2ecc71", edgecolor="white")
-            ax_cat.set_title(c.replace("_", " ").title(), fontsize=10)
-            ax_cat.set_xlabel("Qtd.")
-            ax_cat.invert_yaxis()
-            fig_cat.tight_layout()
-            if idx % 2 == 0:
-                ccol1.pyplot(fig_cat)
-            else:
-                ccol2.pyplot(fig_cat)
-            plt.close(fig_cat)
+        st.markdown("#### Distribuição das categorias")
+        for c in cat_cols_chart:
+            vcounts = df_view[c].value_counts().head(10).reset_index()
+            vcounts.columns = [c, "Quantidade"]
+            _fig_cat = px.bar(
+                vcounts, 
+                x="Quantidade", 
+                y=c,
+                orientation="h",
+                title=f"Top 10 - {c.replace('_', ' ').title()}",
+                color="Quantidade",
+                color_continuous_scale="Viridis",
+                hover_data={"Quantidade": ":,"},
+                height=400
+            )
+            _fig_cat.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
+            st.plotly_chart(_fig_cat, use_container_width=True)
+            del _fig_cat
         gc.collect()
 
 with tab_rel:
     st.markdown("Explore relacoes entre variaveis. Correlacoes altas indicam que uma variavel pode prever a outra.")
     if len(numeric_cols_corr) >= 2:
-        st.markdown("#### Mapa de correlacao")
-        st.caption("Valores proximos de +1 ou -1 indicam relacao forte. Proximos de 0 indicam independencia.")
+        st.markdown("#### Mapa de correlação")
+        st.caption("Valores próximos de +1 ou -1 indicam relação forte. Próximos de 0 indicam independência.")
         corr = df_view[numeric_cols_corr].corr(numeric_only=True)
-        _sz = max(6, len(numeric_cols_corr))
-        fig_corr, ax_corr = plt.subplots(figsize=(_sz, _sz - 1))
-        cax = ax_corr.matshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
-        fig_corr.colorbar(cax)
-        ax_corr.set_xticks(range(len(corr.columns)))
-        ax_corr.set_yticks(range(len(corr.columns)))
-        ax_corr.set_xticklabels([c.replace("_", " ") for c in corr.columns], rotation=45, ha="left", fontsize=9)
-        ax_corr.set_yticklabels([c.replace("_", " ") for c in corr.columns], fontsize=9)
-        for (i, j), val in np.ndenumerate(corr.values):
-            ax_corr.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7,
-                         color="white" if abs(val) > 0.5 else "black")
-        fig_corr.tight_layout()
-        st.pyplot(fig_corr)
-        plt.close(fig_corr)
-        del fig_corr, corr
+        
+        _fig_corr = go.Figure(data=go.Heatmap(
+            z=corr.values,
+            x=[c.replace("_", " ") for c in corr.columns],
+            y=[c.replace("_", " ") for c in corr.columns],
+            colorscale="RdBu",
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            text=np.round(corr.values, 2),
+            texttemplate="%{text:.2f}",
+            textfont={"size": 9},
+            colorbar=dict(title="Correlação"),
+            hovertemplate="<b>%{x}</b> vs <b>%{y}</b><br>Correlação: %{z:.3f}<extra></extra>",
+        ))
+        _fig_corr.update_layout(height=600, xaxis={"side": "bottom"}, hovermode="closest")
+        st.plotly_chart(_fig_corr, use_container_width=True)
+        del _fig_corr, corr
         gc.collect()
 
-        st.markdown("#### Relacao entre duas variaveis")
-        st.caption("Selecione dois atributos para ver como eles se relacionam no grafico de dispersao.")
-        rel1, rel2, rel3 = st.columns(3)
+        st.markdown("#### Relação entre variáveis (Scatter Interativo)")
+        st.caption("Selecione dois ou três atributos para visualização interativa. Passe o mouse sobre os pontos para mais detalhes.")
+        rel1, rel2, rel3, rel4 = st.columns(4)
         col_x = rel1.selectbox("Eixo X", numeric_cols_corr, index=0, key="dash_x")
         col_y = rel2.selectbox("Eixo Y", numeric_cols_corr, index=min(1, len(numeric_cols_corr) - 1), key="dash_y")
-        color_by = rel3.selectbox("Colorir por", ["Nenhum"] + cat_cols_chart, key="dash_color")
+        col_z = rel3.selectbox("Eixo Z (3D)", ["Nenhum"] + numeric_cols_corr, key="dash_z")
+        color_by = rel4.selectbox("Colorir por", ["Nenhum"] + cat_cols_chart, key="dash_color")
 
-        # Amostrar para scatter nao travar
         _sc_df = df_view if len(df_view) <= MAX_SCATTER_ROWS else df_view.sample(MAX_SCATTER_ROWS, random_state=42)
-        fig_sc, ax_sc = plt.subplots(figsize=(8.6, 4.8))
-        if color_by != "Nenhum":
-            for grupo, sub in _sc_df.groupby(color_by):
-                ax_sc.scatter(sub[col_x], sub[col_y], label=str(grupo), alpha=0.7, s=20)
-            ax_sc.legend(title=color_by.replace("_", " ").title(), fontsize=8)
+        _sc_df = _sc_df.dropna(subset=[col_x, col_y] + ([col_z] if col_z != "Nenhum" else []))
+        
+        if col_z != "Nenhum" and len(_sc_df) > 0:
+            _fig_sc = px.scatter_3d(
+                _sc_df,
+                x=col_x, y=col_y, z=col_z,
+                color=color_by if color_by != "Nenhum" else None,
+                hover_data={col_x: ":.2f", col_y: ":.2f", col_z: ":.2f"},
+                title="Scatter Plot 3D Interativo",
+                height=700
+            )
         else:
-            ax_sc.scatter(_sc_df[col_x], _sc_df[col_y], alpha=0.5, color="#9b59b6", s=20)
-        ax_sc.set_xlabel(col_x.replace("_", " ").title())
-        ax_sc.set_ylabel(col_y.replace("_", " ").title())
-        fig_sc.tight_layout()
-        st.pyplot(fig_sc)
-        plt.close(fig_sc)
+            _fig_sc = px.scatter(
+                _sc_df,
+                x=col_x, y=col_y,
+                color=color_by if color_by != "Nenhum" else None,
+                hover_data={col_x: ":.2f", col_y: ":.2f"},
+                title="Scatter Plot Interativo",
+                height=600
+            )
+        
+        _fig_sc.update_layout(hovermode="closest")
+        st.plotly_chart(_fig_sc, use_container_width=True)
+        del _fig_sc
         gc.collect()
 
     date_cols = [c for c in df_view.columns if "data" in c.lower() or "date" in c.lower() or "mes" in c.lower()]
@@ -1898,14 +1930,23 @@ if tipo_problema == "Classificacao (sim/nao)":
             "Importancia": melhor_modelo.feature_importances_
         }).sort_values("Importancia", ascending=False)
 
-        st.markdown("#### Variaveis mais importantes")
-        st.caption("Quanto maior a barra, mais aquela variavel influencia a decisao do modelo.")
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.barh(imp["Variavel"], imp["Importancia"], color="#4e8cff")
-        ax.set_xlabel("Importancia relativa")
-        ax.invert_yaxis()
-        st.pyplot(fig)
-        plt.close()
+        st.markdown("#### Variáveis mais importantes")
+        st.caption("Quanto maior a barra, mais aquela variável influencia a decisão do modelo.")
+        
+        _fig_imp = px.bar(
+            imp.sort_values("Importancia"),
+            x="Importancia",
+            y="Variavel",
+            orientation="h",
+            title="Feature Importance - Classificação",
+            color="Importancia",
+            color_continuous_scale="Blues",
+            hover_data={"Importancia": ":.4f"},
+            height=350
+        )
+        _fig_imp.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
+        st.plotly_chart(_fig_imp, use_container_width=True)
+        del _fig_imp
 
     probs = melhor_modelo.predict_proba(X)[:, 1]
     df_rank = df_model.copy()
@@ -2051,25 +2092,58 @@ elif tipo_problema == "Regressao (valor numerico)":
             "Importancia": melhor_modelo.feature_importances_
         }).sort_values("Importancia", ascending=False)
 
-        st.markdown("#### Variaveis mais importantes")
-        st.caption("Quanto maior a barra, mais aquela variavel influencia o valor previsto.")
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.barh(imp["Variavel"], imp["Importancia"], color="#f4a261")
-        ax.set_xlabel("Importancia relativa")
-        ax.invert_yaxis()
-        st.pyplot(fig)
-        plt.close()
+        st.markdown("#### Variáveis mais importantes")
+        st.caption("Quanto maior a barra, mais aquela variável influencia o valor previsto.")
+        
+        _fig_imp_reg = px.bar(
+            imp.sort_values("Importancia"),
+            x="Importancia",
+            y="Variavel",
+            orientation="h",
+            title="Feature Importance - Regressão",
+            color="Importancia",
+            color_continuous_scale="Oranges",
+            hover_data={"Importancia": ":.4f"},
+            height=350
+        )
+        _fig_imp_reg.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
+        st.plotly_chart(_fig_imp_reg, use_container_width=True)
+        del _fig_imp_reg
 
     pred_test = melhor_modelo.predict(X_test)
     st.markdown("#### Real vs Previsto")
-    st.caption("Pontos proximos da linha vermelha indicam previsoes precisas.")
-    fig2, ax2 = plt.subplots(figsize=(7, 4))
-    ax2.scatter(y_test, pred_test, alpha=0.6, color="#4e8cff")
-    ax2.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], "r--")
-    ax2.set_xlabel("Valor Real")
-    ax2.set_ylabel("Valor Previsto")
-    st.pyplot(fig2)
-    plt.close()
+    st.caption("Pontos próximos da linha vermelha indicam previsões precisas. Use zoom e pan para explorar.")
+    
+    _df_pred = pd.DataFrame({
+        "Real": y_test,
+        "Previsto": pred_test,
+        "Erro": np.abs(y_test - pred_test)
+    })
+    
+    _fig_real_pred = px.scatter(
+        _df_pred,
+        x="Real",
+        y="Previsto",
+        color="Erro",
+        color_continuous_scale="Reds",
+        hover_data={"Real": ":.2f", "Previsto": ":.2f", "Erro": ":.2f"},
+        title="Real vs Previsto (com erro absoluto)",
+        height=550,
+        labels={"Real": "Valor Real", "Previsto": "Valor Previsto"}
+    )
+    
+    _fig_real_pred.add_trace(go.Scatter(
+        x=[y_test.min(), y_test.max()],
+        y=[y_test.min(), y_test.max()],
+        mode="lines",
+        name="Perfeito (y=x)",
+        line=dict(color="red", dash="dash", width=2),
+        hovertemplate="Linha perfeita<extra></extra>"
+    ))
+    
+    _fig_real_pred.update_layout(hovermode="closest")
+    st.plotly_chart(_fig_real_pred, use_container_width=True)
+    del _fig_real_pred, _df_pred
 
     previsoes_todas = melhor_modelo.predict(X)
     df_rank = df_model.copy()
@@ -2116,27 +2190,53 @@ elif tipo_problema == "Clustering (agrupamento)":
     st.markdown("#### Tamanho dos grupos")
     tamanhos = df_cluster["Grupo"].value_counts().reset_index()
     tamanhos.columns = ["Grupo", "Qtd. Clientes"]
-    fig3, ax3 = plt.subplots(figsize=(7, 4))
-    ax3.bar(tamanhos["Grupo"], tamanhos["Qtd. Clientes"], color=["#4e8cff", "#f4a261", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#f39c12", "#e67e22"])
-    ax3.set_ylabel("Quantidade de Clientes")
-    st.pyplot(fig3)
-    plt.close()
+    
+    _fig_tamanhos = px.bar(
+        tamanhos,
+        x="Grupo",
+        y="Qtd. Clientes",
+        color="Qtd. Clientes",
+        color_continuous_scale="Viridis",
+        title="Distribuição de Clientes por Grupo",
+        hover_data={"Qtd. Clientes": ":,"},
+        height=400
+    )
+    _fig_tamanhos.update_layout(hovermode="closest")
+    st.plotly_chart(_fig_tamanhos, use_container_width=True)
+    del _fig_tamanhos
 
     if len(features_selecionadas) >= 2:
-        st.markdown("#### Visualizacao dos grupos")
-        st.caption("Selecione duas variaveis para ver como os grupos se distribuem no espaco.")
-        fx = st.selectbox("Eixo X", features_selecionadas, index=0)
-        fy = st.selectbox("Eixo Y", features_selecionadas, index=min(1, len(features_selecionadas)-1))
-        fig4, ax4 = plt.subplots(figsize=(8, 5))
-        cores = ["#4e8cff", "#f4a261", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#f39c12", "#e67e22"]
-        for i, grupo in enumerate(sorted(df_cluster["Grupo"].unique())):
-            sub = df_cluster[df_cluster["Grupo"] == grupo]
-            ax4.scatter(sub[fx], sub[fy], label=grupo, alpha=0.7, color=cores[i % len(cores)])
-        ax4.set_xlabel(fx)
-        ax4.set_ylabel(fy)
-        ax4.legend()
-        st.pyplot(fig4)
-        plt.close()
+        st.markdown("#### Visualização dos grupos (Interativa 3D)")
+        st.caption("Selecione variáveis para ver como os grupos se distribuem. Escolha Z para ativar modo 3D.")
+        col_x, col_y, col_z = st.columns(3)
+        fx = col_x.selectbox("Eixo X", features_selecionadas, index=0)
+        fy = col_y.selectbox("Eixo Y", features_selecionadas, index=min(1, len(features_selecionadas)-1))
+        fz = col_z.selectbox("Eixo Z (3D)", ["Nenhum"] + features_selecionadas, index=0)
+        
+        _cluster_plot_df = df_cluster.dropna(subset=[fx, fy] + ([fz] if fz != "Nenhum" else []))
+        
+        if fz != "Nenhum" and len(_cluster_plot_df) > 0:
+            _fig_cluster = px.scatter_3d(
+                _cluster_plot_df,
+                x=fx, y=fy, z=fz,
+                color="Grupo",
+                hover_data={fx: ":.2f", fy: ":.2f", fz: ":.2f", "Grupo": True},
+                title="Distribuição dos Clusters em 3D",
+                height=700
+            )
+        else:
+            _fig_cluster = px.scatter(
+                _cluster_plot_df,
+                x=fx, y=fy,
+                color="Grupo",
+                hover_data={fx: ":.2f", fy: ":.2f", "Grupo": True},
+                title="Distribuição dos Clusters",
+                height=600
+            )
+        
+        _fig_cluster.update_layout(hovermode="closest")
+        st.plotly_chart(_fig_cluster, use_container_width=True)
+        del _fig_cluster, _cluster_plot_df
 
     st.markdown("#### Dados com grupos atribuidos")
     st.dataframe(df_cluster, use_container_width=True)
