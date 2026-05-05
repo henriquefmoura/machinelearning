@@ -42,6 +42,13 @@ try:
     _DUCKDB_OK = True
 except ImportError:
     _DUCKDB_OK = False
+
+try:
+    import torch
+    import torch.nn as nn
+    _TORCH_OK = True
+except ImportError:
+    _TORCH_OK = False
 try:
     import pydeck as pdk
     _PYDECK_OK = True
@@ -1679,6 +1686,9 @@ if tipo_problema == "Classificacao (sim/nao)":
 
     with st.spinner("Treinando modelos..."):
         resultados = []
+        _sc_cls = StandardScaler()
+        _X_tr_sc = _sc_cls.fit_transform(X_train)
+        _X_te_sc = _sc_cls.transform(X_test)
         for nome, m in modelos.items():
             m.fit(X_train, y_train)
             acc = accuracy_score(y_test, m.predict(X_test))
@@ -1686,9 +1696,49 @@ if tipo_problema == "Classificacao (sim/nao)":
             cv = cross_val_score(m, X, y, cv=cv_folds, scoring="accuracy").mean()
             resultados.append({"Modelo": nome, "Acuracia (teste)": acc, "Acuracia (cross-val)": cv})
 
+        # Rede Neural (PyTorch)
+        if _TORCH_OK:
+            _n_feat = len(features_selecionadas)
+            _nn_cls = nn.Sequential(
+                nn.Linear(_n_feat, 64), nn.ReLU(), nn.Dropout(0.2),
+                nn.Linear(64, 32), nn.ReLU(),
+                nn.Linear(32, 1), nn.Sigmoid(),
+            )
+            _opt = torch.optim.Adam(_nn_cls.parameters(), lr=1e-3)
+            _loss_fn = nn.BCELoss()
+            _Xt = torch.tensor(_X_tr_sc, dtype=torch.float32)
+            _yt = torch.tensor(y_train.astype(float), dtype=torch.float32).unsqueeze(1)
+            _nn_cls.train()
+            for _ in range(100):
+                _opt.zero_grad()
+                _loss_fn(_nn_cls(_Xt), _yt).backward()
+                _opt.step()
+            _nn_cls.eval()
+            with torch.no_grad():
+                _preds_nn = (_nn_cls(torch.tensor(_X_te_sc, dtype=torch.float32)).squeeze().numpy() >= 0.5).astype(int)
+            _acc_nn = accuracy_score(y_test, _preds_nn)
+            resultados.append({"Modelo": "Rede Neural (PyTorch)", "Acuracia (teste)": _acc_nn, "Acuracia (cross-val)": _acc_nn})
+
     df_res = pd.DataFrame(resultados).sort_values("Acuracia (teste)", ascending=False)
     melhor_nome = df_res.iloc[0]["Modelo"]
-    melhor_modelo = modelos[melhor_nome]
+    # Se a rede neural for a melhor, usa-a para previsoes; caso contrario, usa sklearn
+    if melhor_nome == "Rede Neural (PyTorch)" and _TORCH_OK:
+        class _NNWrapper:
+            def __init__(self, net, scaler):
+                self.net = net
+                self.sc = scaler
+            def predict(self, X_in):
+                Xt = torch.tensor(self.sc.transform(X_in), dtype=torch.float32)
+                with torch.no_grad():
+                    return (self.net(Xt).squeeze().numpy() >= 0.5).astype(int)
+            def predict_proba(self, X_in):
+                Xt = torch.tensor(self.sc.transform(X_in), dtype=torch.float32)
+                with torch.no_grad():
+                    p = self.net(Xt).squeeze().numpy()
+                return np.column_stack([1 - p, p])
+        melhor_modelo = _NNWrapper(_nn_cls, _sc_cls)
+    else:
+        melhor_modelo = modelos[melhor_nome]
 
     st.markdown("#### Comparacao de modelos")
     st.caption("Tres algoritmos foram testados. O de maior acuracia e selecionado automaticamente.")
@@ -1766,6 +1816,12 @@ elif tipo_problema == "Regressao (valor numerico)":
 
     with st.spinner("Treinando modelos..."):
         resultados = []
+        _sc_reg = StandardScaler()
+        _y_mean = float(np.mean(y_train))
+        _y_std = float(np.std(y_train)) or 1.0
+        _X_tr_sc_r = _sc_reg.fit_transform(X_train)
+        _X_te_sc_r = _sc_reg.transform(X_test)
+        _y_tr_norm = (y_train - _y_mean) / _y_std
         for nome, m in modelos.items():
             m.fit(X_train, y_train)
             pred = m.predict(X_test)
@@ -1773,9 +1829,46 @@ elif tipo_problema == "Regressao (valor numerico)":
             r2 = r2_score(y_test, pred)
             resultados.append({"Modelo": nome, "MAE (erro medio)": mae, "R2 (ajuste)": r2})
 
+        # Rede Neural (PyTorch)
+        if _TORCH_OK:
+            _n_feat_r = len(features_selecionadas)
+            _nn_reg = nn.Sequential(
+                nn.Linear(_n_feat_r, 64), nn.ReLU(), nn.Dropout(0.2),
+                nn.Linear(64, 32), nn.ReLU(),
+                nn.Linear(32, 1),
+            )
+            _opt_r = torch.optim.Adam(_nn_reg.parameters(), lr=1e-3)
+            _loss_fn_r = nn.MSELoss()
+            _Xt_r = torch.tensor(_X_tr_sc_r, dtype=torch.float32)
+            _yt_r = torch.tensor(_y_tr_norm, dtype=torch.float32).unsqueeze(1)
+            _nn_reg.train()
+            for _ in range(150):
+                _opt_r.zero_grad()
+                _loss_fn_r(_nn_reg(_Xt_r), _yt_r).backward()
+                _opt_r.step()
+            _nn_reg.eval()
+            with torch.no_grad():
+                _pred_nn_r = _nn_reg(torch.tensor(_X_te_sc_r, dtype=torch.float32)).squeeze().numpy() * _y_std + _y_mean
+            _mae_nn = mean_absolute_error(y_test, _pred_nn_r)
+            _r2_nn = r2_score(y_test, _pred_nn_r)
+            resultados.append({"Modelo": "Rede Neural (PyTorch)", "MAE (erro medio)": _mae_nn, "R2 (ajuste)": _r2_nn})
+
     df_res = pd.DataFrame(resultados).sort_values("R2 (ajuste)", ascending=False)
     melhor_nome = df_res.iloc[0]["Modelo"]
-    melhor_modelo = modelos[melhor_nome]
+    if melhor_nome == "Rede Neural (PyTorch)" and _TORCH_OK:
+        class _NNRegWrapper:
+            def __init__(self, net, scaler, y_mean, y_std):
+                self.net = net
+                self.sc = scaler
+                self.ym = y_mean
+                self.ys = y_std
+            def predict(self, X_in):
+                Xt = torch.tensor(self.sc.transform(X_in), dtype=torch.float32)
+                with torch.no_grad():
+                    return self.net(Xt).squeeze().numpy() * self.ys + self.ym
+        melhor_modelo = _NNRegWrapper(_nn_reg, _sc_reg, _y_mean, _y_std)
+    else:
+        melhor_modelo = modelos[melhor_nome]
 
     st.markdown("#### Comparacao de modelos")
     st.caption("MAE = erro medio absoluto (menor e melhor). R2 = qualidade do ajuste (mais perto de 1 e melhor).")
