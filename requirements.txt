@@ -1,4 +1,6 @@
 # rebuild-v5 - pyarrow sem limite superior para wheel Python 3.14
+# torch é OPCIONAL — usado apenas para redes neurais em análise ML
+# Para instalar localmente: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 streamlit>=1.35.0,<2.0.0
 pandas>=2.0.0,<3.0.0
 numpy>=2.0.0
@@ -10,4 +12,3 @@ requests>=2.31.0,<3.0.0
 pydeck>=0.8.0
 duckdb>=1.0.0
 mlflow>=2.13.0
-torch>=2.0.0
