@@ -751,6 +751,15 @@ if st.session_state.get("app_schema_version") != APP_SCHEMA_VERSION:
     st.session_state.large_mode_active = False
     st.session_state.app_schema_version = APP_SCHEMA_VERSION
 
+# ── Carrega dados persistidos do disco quando a sessão começa ─
+if "hub_df" not in st.session_state:
+    _disk_hub, _disk_key = carregar_hub()
+    st.session_state.hub_df = _disk_hub
+    st.session_state.hub_key = st.session_state.get("hub_key", _disk_key)
+    st.session_state.hub_total_rows = len(_disk_hub)
+    if not _disk_hub.empty:
+        st.session_state.last_update_at = "recuperado do disco"
+
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.markdown("## 📊 ML Insights Hub")
 st.sidebar.caption(f"Build: {APP_SCHEMA_VERSION}")
