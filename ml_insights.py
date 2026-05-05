@@ -157,6 +157,25 @@ def inject_custom_css():
 
 import gc
 
+def format_number(num, decimals=1, abbreviate=True):
+    """Formata número inteligentemente: 1000 → 1.0K, 1000000 → 1.0M, etc"""
+    try:
+        num = float(num)
+        if np.isnan(num) or np.isinf(num):
+            return "N/A"
+    except (ValueError, TypeError):
+        return "N/A"
+    
+    if not abbreviate or abs(num) < 1000:
+        if isinstance(num, float):
+            return f"{num:,.{decimals}f}".rstrip('0').rstrip('.')
+        return f"{int(num):,}"
+    
+    for unit, divisor in [("B", 1e9), ("M", 1e6), ("K", 1e3)]:
+        if abs(num) >= divisor:
+            return f"{(num / divisor):.{decimals}f}".rstrip('0').rstrip('.') + unit
+    return f"{num:,.{decimals}f}".rstrip('0').rstrip('.')
+
 st.set_page_config(page_title="ML Insights Hub", page_icon="📊", layout="wide")
 inject_custom_css()
 
@@ -1285,10 +1304,10 @@ missing_pct = (missing_total / (max(1, df_view.shape[0] * df_view.shape[1]))) * 
 
 kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
 _total_display = st.session_state.get("hub_total_rows") or df.shape[0]
-kpi_1.metric("👥 Clientes Analisados", f"{_total_display:,}")
-kpi_2.metric("📊 Variaveis de Analise", f"{df.shape[1]:,}")
-kpi_3.metric("⚠️ Dados Incompletos", f"{missing_total:,}")
-kpi_4.metric("✅ Qualidade dos Dados", f"{100 - missing_pct:.1f}%")
+kpi_1.metric("👥 Clientes Analisados", format_number(_total_display, abbreviate=True))
+kpi_2.metric("📊 Variáveis de Análise", f"{df.shape[1]}")
+kpi_3.metric("⚠️ Dados Incompletos", format_number(missing_total, abbreviate=True))
+kpi_4.metric("✅ Qualidade dos Dados", f"{max(0, 100 - missing_pct):.1f}%")
 
 tab_overview, tab_profile, tab_rel, tab_mapa, tab_export = st.tabs([
     "📋 Visao Geral",
@@ -1313,16 +1332,17 @@ with tab_overview:
             st.info("Nenhuma coluna numerica encontrada para estatisticas.")
 
     if numeric_cols:
-        st.markdown("#### Indicadores por variavel")
+        st.markdown("#### Indicadores por variável")
         kpi_cols = numeric_cols[:6]
         kpi_grid = st.columns(len(kpi_cols))
         for i, c in enumerate(kpi_cols):
             total = df_view[c].sum()
             media = df_view[c].mean()
+            mediana = df_view[c].median()
             kpi_grid[i].metric(
                 label=c.replace("_", " ").title(),
-                value=f"{media:,.2f}",
-                delta=f"total {total:,.0f}",
+                value=format_number(media, decimals=1, abbreviate=True),
+                delta=f"total {format_number(total, abbreviate=True)} | med {format_number(mediana, abbreviate=True)}",
             )
 
 with tab_profile:
