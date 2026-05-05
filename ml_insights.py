@@ -19,6 +19,7 @@ print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import (
     RandomForestClassifier,
@@ -1626,19 +1627,29 @@ if len(features_selecionadas) == 0:
     )
     st.stop()
 
-df_model = df[features_selecionadas + [target_col]].dropna()
+# Descarta apenas linhas sem valor na coluna alvo (não pode ser imputada)
+_df_raw = df[features_selecionadas + [target_col]].dropna(subset=[target_col])
 
-if df_model.empty or len(df_model) < 4:
+if _df_raw.empty or len(_df_raw) < 4:
     n_raw = len(df[features_selecionadas + [target_col]])
-    n_after = len(df_model)
     st.error(
-        f"**Dados insuficientes para treinar o modelo** ({n_after} linhas válidas de {n_raw} totais após remover NaN).\n\n"
-        "Possíveis causas:\n"
-        "- As colunas preditoras ou a coluna alvo têm muitos valores em branco\n"
-        "- O arquivo foi carregado parcialmente\n\n"
-        "**Tente:** escolher outras colunas preditoras, ou use a coluna alvo com menos valores em branco."
+        f"**Dados insuficientes para treinar o modelo** (coluna alvo '{target_col}' tem menos de 4 valores preenchidos de {n_raw} linhas).\n\n"
+        "Escolha outra coluna alvo que tenha mais dados preenchidos."
     )
     st.stop()
+
+# Imputa NaN nas features com a mediana de cada coluna
+_imputer = SimpleImputer(strategy="median")
+_X_imputed = _imputer.fit_transform(_df_raw[features_selecionadas])
+df_model = _df_raw.copy()
+df_model[features_selecionadas] = _X_imputed
+
+_n_imputed = int(_df_raw[features_selecionadas].isna().sum().sum())
+if _n_imputed > 0:
+    st.info(
+        f"ℹ️ {_n_imputed:,} valores em branco nas colunas preditoras foram preenchidos automaticamente "
+        "com a mediana de cada coluna para o treinamento do modelo."
+    )
 
 X = df_model[features_selecionadas]
 le = LabelEncoder()
