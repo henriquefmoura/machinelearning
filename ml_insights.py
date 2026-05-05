@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import traceback as _traceback
 
 import streamlit as st
@@ -332,7 +332,7 @@ def require_authentication():
             st.markdown("##### 🔑 Acesso ao painel")
             senha = st.text_input("Senha", type="password", placeholder="••••••••", label_visibility="collapsed")
             st.caption("Senha")
-            if st.button("Acessar Dashboard", type="primary", use_container_width=True):
+            if st.button("Acessar Dashboard", type="primary", width='stretch'):
                 if hmac.compare_digest(senha, APP_PASSWORD):
                     st.session_state.auth_ok = True
                     st.rerun()
@@ -359,7 +359,7 @@ with col_hdr:
     )
 with col_sair:
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Sair", use_container_width=True):
+    if st.button("Sair", width='stretch'):
         st.session_state.auth_ok = False
         st.rerun()
 st.divider()
@@ -488,6 +488,18 @@ def compute_upload_hash(files):
     return h.hexdigest()
 
 
+def _hashable_cols(df):
+    """Retorna apenas colunas cujos valores são hashable (seguro para drop_duplicates sem subset)."""
+    safe = []
+    for c in df.columns:
+        try:
+            df[c].drop_duplicates()
+            safe.append(c)
+        except TypeError:
+            pass
+    return safe
+
+
 def upsert_hub(base_df, new_df, key_col):
     if base_df is None or base_df.empty:
         return new_df.copy()
@@ -517,7 +529,9 @@ def merge_clean_into_hub(hub, clean, preferred_key):
             return hub, current_key
 
     hub = pd.concat([hub, clean], ignore_index=True)
-    hub = hub.drop_duplicates(keep="last")
+    _safe = _hashable_cols(hub)
+    if _safe:
+        hub = hub.drop_duplicates(subset=_safe, keep="last")
     return hub, None
 
 
@@ -539,7 +553,9 @@ def merge_clean_into_hub_sampled(hub, clean, preferred_key, cap_rows):
         if current_key in merged.columns:
             merged = merged.drop_duplicates(subset=[current_key], keep="last")
         else:
-            merged = merged.drop_duplicates(keep="last")
+            _safe_m = _hashable_cols(merged)
+            if _safe_m:
+                merged = merged.drop_duplicates(subset=_safe_m, keep="last")
 
     if len(merged) > cap_rows:
         merged = merged.sample(cap_rows, random_state=42)
@@ -824,7 +840,7 @@ def _render_map(map_df: pd.DataFrame, cat_cols_avail: list):
                 map_provider="carto",
                 map_style="dark",
             )
-            st.pydeck_chart(_deck, use_container_width=True)
+            st.pydeck_chart(_deck, width='stretch')
         except Exception as _pdk_err:
             st.warning(f"pydeck indisponivel ({_pdk_err}). Usando mapa simples.")
             st.map(map_df[["lat", "lon"]])
@@ -834,7 +850,7 @@ def _render_map(map_df: pd.DataFrame, cat_cols_avail: list):
     _show = [c for c in ["nome", "rua", "bairro", "cidade", "estado", "lat", "lon"] if c in map_df.columns]
     if _show:
         with st.expander("📋 Ver tabela de endereços plotados"):
-            st.dataframe(map_df[_show].reset_index(drop=True), use_container_width=True)
+            st.dataframe(map_df[_show].reset_index(drop=True), width='stretch')
 
 
 # ── Estado inicial ───────────────────────────────────────────
@@ -1006,9 +1022,9 @@ if uploaded_files and len(uploaded_files) >= 2:
                     _ov = [c for c in _prev_b2.columns if c in _prev_a.columns and c != _jca]
                     _prev_b2 = _prev_b2.drop(columns=_ov, errors="ignore")
                     _prev_join = _prev_a.merge(_prev_b2, on=_jca, how=_jtype)
-                    st.dataframe(_prev_join.head(5), use_container_width=True)
+                    st.dataframe(_prev_join.head(5), width='stretch')
 
-                if st.button("🔗 Aplicar JOIN no Hub", key="do_join", use_container_width=True):
+                if st.button("🔗 Aplicar JOIN no Hub", key="do_join", width='stretch'):
                     with st.spinner("Aplicando JOIN..."):
                         _fa.seek(0)
                         _fb.seek(0)
@@ -1074,10 +1090,10 @@ st.sidebar.markdown("---")
 _can_analyze = (bool(uploaded_files) or _has_hub) and _cfg_has_columns
 rodar = st.session_state.pop("auto_run_ml", False)
 
-analisar_tudo = st.sidebar.button(
+_click_atualizar = st.sidebar.button(
     "▶ Atualizar Dashboard",
     type="primary",
-    use_container_width=True,
+    width='stretch',
     disabled=not _can_analyze,
 )
 if not _can_analyze:
@@ -1094,13 +1110,15 @@ _novo_upload = (
     and bool(current_upload_hash)
     and current_upload_hash != st.session_state.get("last_processed_hash", "")
 )
-if _novo_upload:
-    analisar_tudo = True
+_auto_processar_upload = _novo_upload and not _click_atualizar
+analisar_tudo = _click_atualizar or _auto_processar_upload
 
 # ── Lógica do botão ───────────────────────────────────────────
 if analisar_tudo and uploaded_files:
     st.session_state.upload_attempted = True
+    _upload_error_main = None
     with st.spinner("⏳ Carregando e processando dados..."):
+      try:
         hub = st.session_state.hub_df.copy()
         rows_ingested = 0
         base_total_rows = int(st.session_state.get("hub_total_rows") or len(hub))
@@ -1210,14 +1228,22 @@ if analisar_tudo and uploaded_files:
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         salvar_hub(hub, st.session_state.get("hub_key", key_col))
-    if processed_count == 0 or rows_after == 0:
+      except Exception as _upload_main_exc:
+        _upload_error_main = _upload_main_exc
+        import traceback as _tb2
+        print(f"[ML_INSIGHTS] Erro crítico no upload:", _tb2.format_exc(), flush=True)
+        st.session_state.last_processed_hash = current_upload_hash  # evita loop
+
+    if _upload_error_main is not None:
+        st.error(f"❌ Erro ao processar o arquivo: `{_upload_error_main}`\n\nDetalhes no log do app.")
+    elif processed_count == 0 or rows_after == 0:
         st.sidebar.error(
             "Nenhum registro válido foi consolidado. "
             "Abra as Configurações avançadas e ajuste a chave única."
         )
         rodar = False
     else:
-        st.session_state.auto_run_ml = True
+        st.session_state.auto_run_ml = _click_atualizar
         if large_mode:
             st.sidebar.success(
                 f"✅ Dashboard atualizado. Total processado: {st.session_state.hub_total_rows:,} | "
@@ -1225,17 +1251,19 @@ if analisar_tudo and uploaded_files:
             )
         else:
             st.sidebar.success(f"✅ Dashboard atualizado com {rows_after:,} registros.")
+        if _auto_processar_upload:
+            st.sidebar.caption("Dados carregados. Clique em 'Atualizar Dashboard' quando quiser rodar o Machine Learning.")
         st.rerun()
 elif analisar_tudo and _has_hub:
     rodar = True
 
-if st.sidebar.button("🗑 Limpar Hub", use_container_width=True):
+if st.sidebar.button("🗑 Limpar Hub", width='stretch'):
     st.session_state.confirm_limpar = True
 
 if st.session_state.confirm_limpar:
     st.sidebar.warning("⚠️ Isso apagará **todos os dados** do hub. Confirma?")
     _cy, _cn = st.sidebar.columns(2)
-    if _cy.button("Sim, limpar", use_container_width=True, key="confirm_yes"):
+    if _cy.button("Sim, limpar", width='stretch', key="confirm_yes"):
         st.session_state.hub_df = pd.DataFrame()
         if HUB_FILE.exists():
             HUB_FILE.unlink()
@@ -1255,7 +1283,7 @@ if st.session_state.confirm_limpar:
                     pass
         st.session_state.confirm_limpar = False
         st.rerun()
-    if _cn.button("Cancelar", use_container_width=True, key="confirm_no"):
+    if _cn.button("Cancelar", width='stretch', key="confirm_no"):
         st.session_state.confirm_limpar = False
         st.rerun()
 
@@ -1376,7 +1404,7 @@ with tab_profile:
         _fig_dist.update_xaxes(title_text="Valor", row=nrows, col=1)
         _fig_dist.update_yaxes(title_text="Frequência", row=1, col=1)
         _fig_dist.update_layout(height=350 * nrows, showlegend=False, hovermode="x unified")
-        st.plotly_chart(_fig_dist, use_container_width=True)
+        st.plotly_chart(_fig_dist, width='stretch')
         del _fig_dist
         gc.collect()
 
@@ -1397,7 +1425,7 @@ with tab_profile:
                 height=400
             )
             _fig_cat.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
-            st.plotly_chart(_fig_cat, use_container_width=True)
+            st.plotly_chart(_fig_cat, width='stretch')
             del _fig_cat
         gc.collect()
 
@@ -1423,7 +1451,7 @@ with tab_rel:
             hovertemplate="<b>%{x}</b> vs <b>%{y}</b><br>Correlação: %{z:.3f}<extra></extra>",
         ))
         _fig_corr.update_layout(height=600, xaxis={"side": "bottom"}, hovermode="closest")
-        st.plotly_chart(_fig_corr, use_container_width=True)
+        st.plotly_chart(_fig_corr, width='stretch')
         del _fig_corr, corr
         gc.collect()
 
@@ -1458,7 +1486,7 @@ with tab_rel:
             )
         
         _fig_sc.update_layout(hovermode="closest")
-        st.plotly_chart(_fig_sc, use_container_width=True)
+        st.plotly_chart(_fig_sc, width='stretch')
         del _fig_sc
         gc.collect()
 
@@ -1534,7 +1562,7 @@ with tab_mapa:
             if _n_ceps > 300:
                 st.warning(f"Muitos CEPs únicos ({_n_ceps}). Geocodificando os primeiros 300.")
 
-            if st.button("📍 Geocodificar e Plotar no Mapa", key="btn_geo_cep", use_container_width=True):
+            if st.button("📍 Geocodificar e Plotar no Mapa", key="btn_geo_cep", width='stretch'):
                 with st.spinner(f"Geocodificando {len(_ceps_to_geo)} CEPs…"):
                     _geo_result = geocode_ceps(_ceps_to_geo)
                 st.session_state["_geo_cep_cache"] = _geo_result
@@ -1604,7 +1632,7 @@ with tab_mapa:
                 c for c in (_raw_m.apply(lambda x: re.sub(r"[^0-9]", "", x)[:8]))
                 if len(c) == 8
             )))[:300]
-            if st.button("📍 Geocodificar por CEP", key="btn_geo_man", use_container_width=True):
+            if st.button("📍 Geocodificar por CEP", key="btn_geo_man", width='stretch'):
                 with st.spinner(f"Geocodificando {len(_valid_m)} CEPs…"):
                     _geo_m = geocode_ceps(_valid_m)
                 st.session_state["_geo_man_cache"] = {
@@ -1921,7 +1949,7 @@ if tipo_problema == "Classificacao (sim/nao)":
 
     st.markdown("#### Comparacao de modelos")
     st.caption("Tres algoritmos foram testados. O de maior acuracia e selecionado automaticamente.")
-    st.dataframe(df_res.style.format({"Acuracia (teste)": "{:.1%}", "Acuracia (cross-val)": "{:.1%}"}), use_container_width=True)
+    st.dataframe(df_res.style.format({"Acuracia (teste)": "{:.1%}", "Acuracia (cross-val)": "{:.1%}"}), width='stretch')
     st.success(f"Melhor modelo: **{melhor_nome}** com **{df_res.iloc[0]['Acuracia (teste)']:.1%}** de acuracia")
 
     if hasattr(melhor_modelo, "feature_importances_"):
@@ -1945,7 +1973,7 @@ if tipo_problema == "Classificacao (sim/nao)":
             height=350
         )
         _fig_imp.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
-        st.plotly_chart(_fig_imp, use_container_width=True)
+        st.plotly_chart(_fig_imp, width='stretch')
         del _fig_imp
 
     probs = melhor_modelo.predict_proba(X)[:, 1]
@@ -1959,7 +1987,7 @@ if tipo_problema == "Classificacao (sim/nao)":
     st.caption("Registros ordenados do mais ao menos propenso a contratar/converter.")
     st.dataframe(
         df_rank.style.format({"prob_contratar": "{:.1%}"}),
-        use_container_width=True
+        width='stretch'
     )
 
     st.markdown("#### Simular novo registro")
@@ -1989,12 +2017,22 @@ elif tipo_problema == "Regressao (valor numerico)":
     )
     st.markdown("---")
 
-    y = df_model[target_col].values
+    y_num = pd.to_numeric(coerce_numeric_series(df_model[target_col]), errors="coerce")
+    _valid_y_mask = y_num.notna()
+    X_reg = X.loc[_valid_y_mask]
+    y = y_num.loc[_valid_y_mask].astype(float).values
 
-    if len(df_model) < 10:
+    if len(y) < 4:
+        st.error(
+            f"A coluna alvo '{target_col}' nao possui valores numericos suficientes para regressao "
+            f"(validos: {int(_valid_y_mask.sum())}/{len(df_model)})."
+        )
+        st.stop()
+
+    if len(X_reg) < 10:
         st.warning("Poucos dados para regressao. Ideal: pelo menos 30 registros para resultados confiaveis.")
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X_reg, y, test_size=0.25, random_state=42)
 
     modelos = {
         "Regressao Linear": LinearRegression(),
@@ -2083,7 +2121,7 @@ elif tipo_problema == "Regressao (valor numerico)":
 
     st.markdown("#### Comparacao de modelos")
     st.caption("MAE = erro medio absoluto (menor e melhor). R2 = qualidade do ajuste (mais perto de 1 e melhor).")
-    st.dataframe(df_res.style.format({"MAE (erro medio)": "{:.2f}", "R2 (ajuste)": "{:.2f}"}), use_container_width=True)
+    st.dataframe(df_res.style.format({"MAE (erro medio)": "{:.2f}", "R2 (ajuste)": "{:.2f}"}), width='stretch')
     st.success(f"Melhor modelo: **{melhor_nome}** com R2 = **{df_res.iloc[0]['R2 (ajuste)']:.2f}**")
 
     if hasattr(melhor_modelo, "feature_importances_"):
@@ -2107,7 +2145,7 @@ elif tipo_problema == "Regressao (valor numerico)":
             height=350
         )
         _fig_imp_reg.update_layout(yaxis={"categoryorder": "total ascending"}, hovermode="closest")
-        st.plotly_chart(_fig_imp_reg, use_container_width=True)
+        st.plotly_chart(_fig_imp_reg, width='stretch')
         del _fig_imp_reg
 
     pred_test = melhor_modelo.predict(X_test)
@@ -2142,7 +2180,7 @@ elif tipo_problema == "Regressao (valor numerico)":
     ))
     
     _fig_real_pred.update_layout(hovermode="closest")
-    st.plotly_chart(_fig_real_pred, use_container_width=True)
+    st.plotly_chart(_fig_real_pred, width='stretch')
     del _fig_real_pred, _df_pred
 
     previsoes_todas = melhor_modelo.predict(X)
@@ -2152,7 +2190,7 @@ elif tipo_problema == "Regressao (valor numerico)":
     df_rank.index += 1
 
     st.markdown(f"#### Ranking por {target_col} previsto")
-    st.dataframe(df_rank, use_container_width=True)
+    st.dataframe(df_rank, width='stretch')
 
 elif tipo_problema == "Clustering (agrupamento)":
     st.markdown(
@@ -2185,7 +2223,7 @@ elif tipo_problema == "Clustering (agrupamento)":
     st.markdown("#### Perfil medio por grupo")
     st.caption("Compare os grupos para entender o que diferencia cada segmento.")
     perfil = df_cluster.groupby("Grupo")[features_selecionadas].mean().round(2)
-    st.dataframe(perfil, use_container_width=True)
+    st.dataframe(perfil, width='stretch')
 
     st.markdown("#### Tamanho dos grupos")
     tamanhos = df_cluster["Grupo"].value_counts().reset_index()
@@ -2202,7 +2240,7 @@ elif tipo_problema == "Clustering (agrupamento)":
         height=400
     )
     _fig_tamanhos.update_layout(hovermode="closest")
-    st.plotly_chart(_fig_tamanhos, use_container_width=True)
+    st.plotly_chart(_fig_tamanhos, width='stretch')
     del _fig_tamanhos
 
     if len(features_selecionadas) >= 2:
@@ -2235,11 +2273,11 @@ elif tipo_problema == "Clustering (agrupamento)":
             )
         
         _fig_cluster.update_layout(hovermode="closest")
-        st.plotly_chart(_fig_cluster, use_container_width=True)
+        st.plotly_chart(_fig_cluster, width='stretch')
         del _fig_cluster, _cluster_plot_df
 
     st.markdown("#### Dados com grupos atribuidos")
-    st.dataframe(df_cluster, use_container_width=True)
+    st.dataframe(df_cluster, width='stretch')
     st.info("Dica: exporte os dados acima (aba Exportacao) e use a coluna Grupo para criar estrategias diferenciadas para cada segmento.")
 
 # ─────────────────────────────────────────────
@@ -2254,7 +2292,7 @@ if _MLFLOW_OK:
     with col2:
         if st.button(
             "📊 Ver todos os experimentos no MLflow",
-            use_container_width=True,
+            width='stretch',
             help="Abre a interface MLflow em localhost:5000 para visualizar histórico de experimentos, comparar modelos e rastrear métricas."
         ):
             st.info(
@@ -2267,3 +2305,4 @@ if _MLFLOW_OK:
         f"✅ Experimento rastreado automaticamente. "
         f"Os dados estão salvos em `./mlruns/` para reprodução e comparação futura."
     )
+
