@@ -165,6 +165,20 @@ HUB_KEY_FILE = Path("hub_key.txt")
 DEFAULT_APP_PASSWORD = "mlhub123"
 
 try:
+    HUB_DB_PATH = st.secrets.get("HUB_DB_PATH", os.environ.get("HUB_DB_PATH", "dados.duckdb"))
+except Exception:
+    HUB_DB_PATH = os.environ.get("HUB_DB_PATH", "dados.duckdb")
+
+try:
+    _raw_tbl = st.secrets.get("HUB_DB_TABLE", os.environ.get("HUB_DB_TABLE", "hub_auto"))
+except Exception:
+    _raw_tbl = os.environ.get("HUB_DB_TABLE", "hub_auto")
+
+HUB_DB_TABLE = re.sub(r"[^a-zA-Z0-9_]", "_", str(_raw_tbl or "hub_auto")).strip("_") or "hub_auto"
+if HUB_DB_TABLE[0].isdigit():
+    HUB_DB_TABLE = f"_{HUB_DB_TABLE}"
+
+try:
     APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD))
 except Exception:
     APP_PASSWORD = os.environ.get("APP_PASSWORD", DEFAULT_APP_PASSWORD)
@@ -180,18 +194,84 @@ LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
 
+def _open_hub_db():
+    if not _DUCKDB_OK:
+        return None
+    try:
+        if str(HUB_DB_PATH).startswith("md:"):
+            try:
+                md_token = st.secrets.get("MOTHERDUCK_TOKEN", os.environ.get("MOTHERDUCK_TOKEN", ""))
+            except Exception:
+                md_token = os.environ.get("MOTHERDUCK_TOKEN", "")
+            if not md_token:
+                return None
+            return _duckdb.connect(HUB_DB_PATH, config={"motherduck_token": md_token})
+        return _duckdb.connect(HUB_DB_PATH)
+    except Exception as _db_exc:
+        print(f"[ML_INSIGHTS] Falha ao abrir banco do hub ({HUB_DB_PATH}): {_db_exc}", flush=True)
+        return None
+
+
 def salvar_hub(df, key):
-    """Salva em disco quando local; na nuvem usa apenas session_state."""
+    """Salva hub em DuckDB (quando disponível) e mantém fallback em parquet."""
     try:
         df.to_parquet(HUB_FILE, index=False)
         HUB_KEY_FILE.write_text(key)
     except Exception:
-        pass  # nuvem sem disco persistente — OK, dados ficam na sessão
+        pass
+
+    con = _open_hub_db()
+    if con is None:
+        return
+
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS hub_meta (k VARCHAR, v VARCHAR)")
+        con.execute("DELETE FROM hub_meta WHERE k='hub_key'")
+        con.execute("INSERT INTO hub_meta VALUES ('hub_key', ?)", [key])
+
+        if df.empty:
+            con.execute(f"DROP TABLE IF EXISTS {HUB_DB_TABLE}")
+        else:
+            con.register("_hub_tmp", df)
+            con.execute(f"CREATE OR REPLACE TABLE {HUB_DB_TABLE} AS SELECT * FROM _hub_tmp")
+            con.unregister("_hub_tmp")
+    except Exception as _save_exc:
+        print(f"[ML_INSIGHTS] Falha ao salvar hub no banco: {_save_exc}", flush=True)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def carregar_hub():
     df = pd.DataFrame()
     key = "id_cliente"
+
+    con = _open_hub_db()
+    if con is not None:
+        try:
+            _tbl = con.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [HUB_DB_TABLE],
+            ).fetchone()[0]
+            if _tbl:
+                df = con.execute(f"SELECT * FROM {HUB_DB_TABLE}").df()
+
+            _meta = con.execute("SELECT v FROM hub_meta WHERE k='hub_key' LIMIT 1").fetchone()
+            if _meta and _meta[0]:
+                key = str(_meta[0])
+        except Exception:
+            pass
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    if not df.empty:
+        return df, key
+
     if HUB_FILE.exists():
         try:
             df = pd.read_parquet(HUB_FILE)
@@ -776,6 +856,13 @@ if "hub_df" not in st.session_state:
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.markdown("## 📊 ML Insights Hub")
 st.sidebar.caption(f"Build: {APP_SCHEMA_VERSION}")
+if IS_CLOUD and str(HUB_DB_PATH) == "dados.duckdb":
+    st.sidebar.warning(
+        "Persistência limitada: configure HUB_DB_PATH (ex: md:seu_db) para manter dados após reinícios do app.",
+        icon="⚠️",
+    )
+else:
+    st.sidebar.caption(f"Banco conectado: {HUB_DB_PATH}")
 st.sidebar.markdown("---")
 
 # ── Upload ────────────────────────────────────────────────────
@@ -1101,17 +1188,6 @@ if analisar_tudo and uploaded_files:
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         salvar_hub(hub, st.session_state.get("hub_key", key_col))
-        # Auto-salva no DuckDB após cada processamento bem-sucedido
-        if _DUCKDB_OK and not hub.empty:
-            try:
-                _auto_db = _duckdb.connect("dados.duckdb")
-                _auto_db.execute("DROP TABLE IF EXISTS hub_auto")
-                _auto_db.register("_hub_tmp", hub)
-                _auto_db.execute("CREATE TABLE hub_auto AS SELECT * FROM _hub_tmp")
-                _auto_db.unregister("_hub_tmp")
-                _auto_db.close()
-            except Exception:
-                pass  # falha silenciosa — DuckDB é secundário
     if processed_count == 0 or rows_after == 0:
         st.sidebar.error(
             "Nenhum registro válido foi consolidado. "
@@ -1143,6 +1219,18 @@ if st.session_state.confirm_limpar:
             HUB_FILE.unlink()
         if HUB_KEY_FILE.exists():
             HUB_KEY_FILE.unlink()
+        _db_con = _open_hub_db()
+        if _db_con is not None:
+            try:
+                _db_con.execute(f"DROP TABLE IF EXISTS {HUB_DB_TABLE}")
+                _db_con.execute("DELETE FROM hub_meta WHERE k='hub_key'")
+            except Exception:
+                pass
+            finally:
+                try:
+                    _db_con.close()
+                except Exception:
+                    pass
         st.session_state.confirm_limpar = False
         st.rerun()
     if _cn.button("Cancelar", use_container_width=True, key="confirm_no"):
