@@ -34,7 +34,13 @@ from sklearn.metrics import (
 import re
 import os
 import io
+import time
 from pathlib import Path
+try:
+    import duckdb as _duckdb
+    _DUCKDB_OK = True
+except ImportError:
+    _DUCKDB_OK = False
 try:
     import pydeck as pdk
     _PYDECK_OK = True
@@ -1463,6 +1469,55 @@ with tab_export:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_excel_lazy",
         )
+
+with tab_export:
+    st.markdown("---")
+    st.markdown("#### 🦆 Salvar no DuckDB (banco local)")
+    if not _DUCKDB_OK:
+        st.warning("DuckDB não instalado. Execute: `pip install duckdb`")
+    else:
+        db_path = st.text_input(
+            "Arquivo do banco",
+            value="dados.duckdb",
+            help="Caminho do arquivo .duckdb onde os dados serão salvos",
+            key="duckdb_path",
+        )
+        table_name = st.text_input(
+            "Nome da tabela",
+            value="dados",
+            key="duckdb_table",
+        )
+        write_mode = st.radio(
+            "Modo de escrita",
+            ["Acumular (APPEND)", "Substituir (TRUNCATE)"],
+            horizontal=True,
+            key="duckdb_write_mode",
+        )
+        if st.button("💾 Salvar no DuckDB", key="btn_duckdb_save"):
+            if not table_name.strip():
+                st.error("Informe o nome da tabela.")
+            else:
+                try:
+                    con = _duckdb.connect(db_path)
+                    if write_mode.startswith("Substituir"):
+                        con.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    con.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {table_name} AS
+                        SELECT * FROM df WHERE 1=0
+                    """)
+                    t0 = time.time()
+                    con.register("df", df)
+                    con.execute(f"INSERT INTO {table_name} SELECT * FROM df")
+                    con.unregister("df")
+                    elapsed = time.time() - t0
+                    rows = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                    con.close()
+                    st.success(
+                        f"✅ {len(df):,} linhas salvas em `{db_path}` → tabela `{table_name}` "
+                        f"(total na tabela: {rows:,} | {elapsed:.3f}s)"
+                    )
+                except Exception as _exc:
+                    st.error(f"Erro ao salvar no DuckDB: {_exc}")
 
 with st.expander("🤖 Assistente IA para Insights", expanded=False):
     st.markdown(
