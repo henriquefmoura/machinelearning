@@ -43,6 +43,12 @@ try:
 except ImportError:
     _DUCKDB_OK = False
 
+try:
+    import mlflow
+    _MLFLOW_OK = True
+except ImportError:
+    _MLFLOW_OK = False
+
 _TORCH_OK = False  # Lazy import — carrega sob demanda no bloco de ML
 try:
     import pydeck as pdk
@@ -1621,6 +1627,18 @@ if not rodar:
     )
     st.stop()
 
+# ─────────────────────────────────────────────
+# Configurar MLflow para rastrear experimentos
+# ─────────────────────────────────────────────
+if _MLFLOW_OK:
+    mlflow.set_tracking_uri("file:./mlruns")  # Local SQLite backend
+    _ml_exp_name = f"ML_{tipo_problema.split('(')[0].strip()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    mlflow.set_experiment(_ml_exp_name)
+    mlflow.start_run(run_name=f"target={target_col}")
+    mlflow.log_param("target_column", target_col)
+    mlflow.log_param("n_features", len(features_selecionadas))
+    mlflow.log_param("problem_type", tipo_problema)
+
 if len(features_selecionadas) == 0:
     st.error(
         "**Nenhuma variavel numerica encontrada.**\n\n"
@@ -1690,6 +1708,11 @@ if tipo_problema == "Classificacao (sim/nao)":
             cv_folds = min(5, max(2, len(y) // 5))
             cv = cross_val_score(m, X, y, cv=cv_folds, scoring="accuracy").mean()
             resultados.append({"Modelo": nome, "Acuracia (teste)": acc, "Acuracia (cross-val)": cv})
+            
+            # Logar no MLflow
+            if _MLFLOW_OK:
+                mlflow.log_metric(f"{nome}_accuracy_test", acc)
+                mlflow.log_metric(f"{nome}_accuracy_cv", cv)
 
         # Rede Neural (PyTorch) — lazy import
         try:
@@ -1714,11 +1737,21 @@ if tipo_problema == "Classificacao (sim/nao)":
                 _preds_nn = (_nn_cls(torch.tensor(_X_te_sc, dtype=torch.float32)).squeeze().numpy() >= 0.5).astype(int)
             _acc_nn = accuracy_score(y_test, _preds_nn)
             resultados.append({"Modelo": "Rede Neural (PyTorch)", "Acuracia (teste)": _acc_nn, "Acuracia (cross-val)": _acc_nn})
+            
+            # Logar no MLflow
+            if _MLFLOW_OK:
+                mlflow.log_metric("Rede Neural (PyTorch)_accuracy_test", _acc_nn)
+                mlflow.log_metric("Rede Neural (PyTorch)_accuracy_cv", _acc_nn)
         except (ImportError, Exception):
             pass  # PyTorch não disponível
 
     df_res = pd.DataFrame(resultados).sort_values("Acuracia (teste)", ascending=False)
     melhor_nome = df_res.iloc[0]["Modelo"]
+    
+    # Logar melhor modelo no MLflow
+    if _MLFLOW_OK:
+        mlflow.log_metric("best_model_accuracy", df_res.iloc[0]["Acuracia (teste)"])
+        mlflow.log_param("best_model", melhor_nome)
     # Se a rede neural for a melhor, tenta usá-la; caso contrário, usa sklearn
     if melhor_nome == "Rede Neural (PyTorch)":
         try:
@@ -1830,6 +1863,11 @@ elif tipo_problema == "Regressao (valor numerico)":
             mae = mean_absolute_error(y_test, pred)
             r2 = r2_score(y_test, pred)
             resultados.append({"Modelo": nome, "MAE (erro medio)": mae, "R2 (ajuste)": r2})
+            
+            # Logar no MLflow
+            if _MLFLOW_OK:
+                mlflow.log_metric(f"{nome}_mae", mae)
+                mlflow.log_metric(f"{nome}_r2", r2)
 
         # Rede Neural (PyTorch) — lazy import
         try:
@@ -1855,11 +1893,22 @@ elif tipo_problema == "Regressao (valor numerico)":
             _mae_nn = mean_absolute_error(y_test, _pred_nn_r)
             _r2_nn = r2_score(y_test, _pred_nn_r)
             resultados.append({"Modelo": "Rede Neural (PyTorch)", "MAE (erro medio)": _mae_nn, "R2 (ajuste)": _r2_nn})
+            
+            # Logar no MLflow
+            if _MLFLOW_OK:
+                mlflow.log_metric("Rede Neural (PyTorch)_mae", _mae_nn)
+                mlflow.log_metric("Rede Neural (PyTorch)_r2", _r2_nn)
         except (ImportError, Exception):
             pass  # PyTorch não disponível
 
     df_res = pd.DataFrame(resultados).sort_values("R2 (ajuste)", ascending=False)
     melhor_nome = df_res.iloc[0]["Modelo"]
+    
+    # Logar melhor modelo no MLflow
+    if _MLFLOW_OK:
+        mlflow.log_metric("best_model_r2", df_res.iloc[0]["R2 (ajuste)"])
+        mlflow.log_metric("best_model_mae", df_res.iloc[0]["MAE (erro medio)"])
+        mlflow.log_param("best_model", melhor_nome)
     if melhor_nome == "Rede Neural (PyTorch)":
         try:
             import torch
@@ -1938,6 +1987,11 @@ elif tipo_problema == "Clustering (agrupamento)":
     with st.spinner("Agrupando registros..."):
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         labels = kmeans.fit_predict(X_scaled)
+        
+        # Logar no MLflow
+        if _MLFLOW_OK:
+            mlflow.log_param("n_clusters", n_clusters)
+            mlflow.log_metric("kmeans_inertia", kmeans.inertia_)
 
     df_cluster = df_model.copy()
     df_cluster["Grupo"] = [f"Grupo {l+1}" for l in labels]
@@ -1975,3 +2029,29 @@ elif tipo_problema == "Clustering (agrupamento)":
     st.markdown("#### Dados com grupos atribuidos")
     st.dataframe(df_cluster, use_container_width=True)
     st.info("Dica: exporte os dados acima (aba Exportacao) e use a coluna Grupo para criar estrategias diferenciadas para cada segmento.")
+
+# ─────────────────────────────────────────────
+# Encerrar MLflow e adicionar link para visualização
+# ─────────────────────────────────────────────
+if _MLFLOW_OK:
+    mlflow.end_run()
+    
+    st.divider()
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        if st.button(
+            "📊 Ver todos os experimentos no MLflow",
+            use_container_width=True,
+            help="Abre a interface MLflow em localhost:5000 para visualizar histórico de experimentos, comparar modelos e rastrear métricas."
+        ):
+            st.info(
+                "Para visualizar os experimentos no MLflow, execute no terminal:\n\n"
+                "`mlflow ui --backend-store-uri file:./mlruns`\n\n"
+                "Depois acesse: http://localhost:5000"
+            )
+    
+    st.caption(
+        f"✅ Experimento rastreado automaticamente. "
+        f"Os dados estão salvos em `./mlruns/` para reprodução e comparação futura."
+    )
