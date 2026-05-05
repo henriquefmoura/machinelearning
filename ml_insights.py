@@ -1615,9 +1615,9 @@ st.markdown("## 🧠 Analise de Machine Learning")
 if not rodar:
     tipo_label = tipo_problema.split("(")[0].strip()
     st.info(
-        f"Analise configurada: **{tipo_label}** | Alvo: **{target_col}** | "
-        f"Preditores: **{len(features_selecionadas)}** variaveis.\n\n"
-        "Clique em **Rodar Analise ML** na barra lateral para executar."
+        f"✅ Análise configurada: **{tipo_label}** | Alvo: **{target_col}** | "
+        f"Preditores: **{len(features_selecionadas)}** variáveis.\n\n"
+        "💡 **O modelo rodará automaticamente** quando você clicar em '▶ Atualizar Dashboard' na barra lateral."
     )
     st.stop()
 
