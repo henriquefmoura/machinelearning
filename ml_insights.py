@@ -1162,34 +1162,22 @@ if analisar_tudo and uploaded_files:
                     else:
                         ignored_count += 1
                     continue
-                if large_mode and f.name.lower().endswith((".xlsx", ".xls")):
-                    # Converte Excel grande automaticamente chunk a chunk via pandas
-                    st.sidebar.info(f"🔄 {f.name}: Excel grande — convertendo automaticamente...")
+
+                # Excel (grande ou pequeno) e CSV pequeno: leitura direta
+                if f.name.lower().endswith((".xlsx", ".xls")):
                     try:
                         _xl_bytes = io.BytesIO(f.getvalue())
-                        _xl_all = pd.read_excel(_xl_bytes, dtype=str)
+                        raw = pd.read_excel(_xl_bytes, dtype=str)
                         _xl_bytes.close()
-                        file_had_rows = False
-                        for _start in range(0, len(_xl_all), 50_000):
-                            chunk = _xl_all.iloc[_start:_start + 50_000].copy()
-                            clean, _, _ = preprocess_df(chunk)
-                            if clean.empty:
-                                continue
-                            file_had_rows = True
-                            rows_ingested += len(clean)
-                            hub, used_key = merge_clean_into_hub_sampled(
-                                hub, clean, key_col, MAX_DASHBOARD_ROWS
-                            )
-                            if used_key:
-                                st.session_state.hub_key = used_key
-                        del _xl_all
-                        if file_had_rows:
-                            processed_count += 1
-                        else:
-                            ignored_count += 1
+                        # Converte strings numéricas para números
+                        for _col in raw.columns:
+                            raw[_col] = coerce_numeric_series(raw[_col])
+                        if len(raw) > MAX_DASHBOARD_ROWS:
+                            raw = raw.sample(MAX_DASHBOARD_ROWS, random_state=42).reset_index(drop=True)
                     except Exception as _xl_err:
-                        st.sidebar.error(f"❌ {f.name}: falha ao converter Excel — {_xl_err}")
-                    continue
+                        st.error(f"❌ {f.name}: falha ao ler Excel — {_xl_err}")
+                        ignored_count += 1
+                        continue
                 else:
                     raw = read_uploaded_file(f)
 
