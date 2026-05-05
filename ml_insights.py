@@ -1627,6 +1627,19 @@ if len(features_selecionadas) == 0:
     st.stop()
 
 df_model = df[features_selecionadas + [target_col]].dropna()
+
+if df_model.empty or len(df_model) < 4:
+    n_raw = len(df[features_selecionadas + [target_col]])
+    n_after = len(df_model)
+    st.error(
+        f"**Dados insuficientes para treinar o modelo** ({n_after} linhas válidas de {n_raw} totais após remover NaN).\n\n"
+        "Possíveis causas:\n"
+        "- As colunas preditoras ou a coluna alvo têm muitos valores em branco\n"
+        "- O arquivo foi carregado parcialmente\n\n"
+        "**Tente:** escolher outras colunas preditoras, ou use a coluna alvo com menos valores em branco."
+    )
+    st.stop()
+
 X = df_model[features_selecionadas]
 le = LabelEncoder()
 scaler = StandardScaler()
