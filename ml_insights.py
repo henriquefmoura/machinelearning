@@ -957,9 +957,14 @@ if not _can_analyze:
 elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
-# ── Auto-refresh por hash ─────────────────────────────────────
-if uploaded_files and current_upload_hash and current_upload_hash != st.session_state.get("last_processed_hash", ""):
-    st.sidebar.info("Arquivo novo detectado. Clique em **Atualizar Dashboard** para processar.")
+# ── Auto-disparo: processa automaticamente ao detectar arquivo novo ──
+_novo_upload = (
+    bool(uploaded_files)
+    and bool(current_upload_hash)
+    and current_upload_hash != st.session_state.get("last_processed_hash", "")
+)
+if _novo_upload:
+    analisar_tudo = True
 
 # ── Lógica do botão ───────────────────────────────────────────
 if analisar_tudo and uploaded_files:
@@ -1013,10 +1018,32 @@ if analisar_tudo and uploaded_files:
                         ignored_count += 1
                     continue
                 if large_mode and f.name.lower().endswith((".xlsx", ".xls")):
-                    st.sidebar.error(
-                        f"❌ {f.name}: Excel muito grande no modo robusto. "
-                        "Converta para CSV para processar sem queda."
-                    )
+                    # Converte Excel grande automaticamente chunk a chunk via pandas
+                    st.sidebar.info(f"🔄 {f.name}: Excel grande — convertendo automaticamente...")
+                    try:
+                        _xl_bytes = io.BytesIO(f.getvalue())
+                        _xl_all = pd.read_excel(_xl_bytes, dtype=str)
+                        _xl_bytes.close()
+                        file_had_rows = False
+                        for _start in range(0, len(_xl_all), 50_000):
+                            chunk = _xl_all.iloc[_start:_start + 50_000].copy()
+                            clean, _, _ = preprocess_df(chunk)
+                            if clean.empty:
+                                continue
+                            file_had_rows = True
+                            rows_ingested += len(clean)
+                            hub, used_key = merge_clean_into_hub_sampled(
+                                hub, clean, key_col, MAX_DASHBOARD_ROWS
+                            )
+                            if used_key:
+                                st.session_state.hub_key = used_key
+                        del _xl_all
+                        if file_had_rows:
+                            processed_count += 1
+                        else:
+                            ignored_count += 1
+                    except Exception as _xl_err:
+                        st.sidebar.error(f"❌ {f.name}: falha ao converter Excel — {_xl_err}")
                     continue
                 else:
                     raw = read_uploaded_file(f)
@@ -1052,6 +1079,17 @@ if analisar_tudo and uploaded_files:
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         salvar_hub(hub, st.session_state.get("hub_key", key_col))
+        # Auto-salva no DuckDB após cada processamento bem-sucedido
+        if _DUCKDB_OK and not hub.empty:
+            try:
+                _auto_db = _duckdb.connect("dados.duckdb")
+                _auto_db.execute("DROP TABLE IF EXISTS hub_auto")
+                _auto_db.register("_hub_tmp", hub)
+                _auto_db.execute("CREATE TABLE hub_auto AS SELECT * FROM _hub_tmp")
+                _auto_db.unregister("_hub_tmp")
+                _auto_db.close()
+            except Exception:
+                pass  # falha silenciosa — DuckDB é secundário
     if processed_count == 0 or rows_after == 0:
         st.sidebar.error(
             "Nenhum registro válido foi consolidado. "
