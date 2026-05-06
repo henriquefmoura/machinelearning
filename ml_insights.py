@@ -215,16 +215,24 @@ LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
 
+@st.cache_resource
+def _get_md_token():
+    """Retorna o token do MotherDuck, lendo secrets uma única vez."""
+    try:
+        return st.secrets.get("MOTHERDUCK_TOKEN", os.environ.get("MOTHERDUCK_TOKEN", ""))
+    except Exception:
+        return os.environ.get("MOTHERDUCK_TOKEN", "")
+
+
 def _open_hub_db():
+    """Abre conexão DuckDB (local ou MotherDuck). Cada chamada abre uma nova conexão — seguro para threads."""
     if not _DUCKDB_OK:
         return None
     try:
         if str(HUB_DB_PATH).startswith("md:"):
-            try:
-                md_token = st.secrets.get("MOTHERDUCK_TOKEN", os.environ.get("MOTHERDUCK_TOKEN", ""))
-            except Exception:
-                md_token = os.environ.get("MOTHERDUCK_TOKEN", "")
+            md_token = _get_md_token()
             if not md_token:
+                print("[ML_INSIGHTS] MOTHERDUCK_TOKEN não configurado. Defina nos Secrets do Streamlit Cloud.", flush=True)
                 return None
             return _duckdb.connect(HUB_DB_PATH, config={"motherduck_token": md_token})
         return _duckdb.connect(HUB_DB_PATH)
@@ -319,7 +327,13 @@ def salvar_arquivo_no_duckdb(uploaded_file):
     return df, len(df), None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_hub():
+    """
+    Lê dados do DuckDB (local ou MotherDuck).
+    Cache de 5 min — evita reconectar a cada rerun.
+    Use carregar_hub.clear() para forçar leitura fresca após upload.
+    """
     df = pd.DataFrame()
     key = "id_cliente"
 
@@ -1157,6 +1171,20 @@ if not _can_analyze:
 elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
+# ── Indicador de conexão MotherDuck ──────────────────────────
+_is_motherduck = str(HUB_DB_PATH).startswith("md:")
+if _is_motherduck:
+    st.sidebar.caption(f"☁️ MotherDuck: `{HUB_DB_PATH}`")
+elif not _has_hub:
+    st.sidebar.caption("💾 Banco local")
+
+# Botão de recarregar dados do banco (útil quando dados foram atualizados externamente)
+if _has_hub:
+    if st.sidebar.button("🔄 Recarregar do banco", width='stretch'):
+        carregar_hub.clear()
+        st.session_state.hub_df = pd.DataFrame()
+        st.rerun()
+
 # ── Upload automático: detecta arquivo novo → salva direto no DuckDB ──
 _novo_upload = (
     bool(uploaded_files)
@@ -1173,6 +1201,7 @@ if _novo_upload:
     elif _df_novo is None or _n_linhas == 0:
         st.error("❌ Arquivo sem dados válidos.")
     else:
+        carregar_hub.clear()  # invalida cache — próxima leitura vem do MotherDuck
         st.session_state.hub_df = _df_novo
         st.session_state.hub_key = suggest_key_column(_df_novo)
         st.session_state.hub_total_rows = _n_linhas
@@ -1208,6 +1237,7 @@ if st.session_state.confirm_limpar:
                     _db_con.close()
                 except Exception:
                     pass
+        carregar_hub.clear()  # invalida cache após limpar
         st.session_state.confirm_limpar = False
         st.rerun()
     if _cn.button("Cancelar", width='stretch', key="confirm_no"):
