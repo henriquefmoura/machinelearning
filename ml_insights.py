@@ -262,6 +262,60 @@ def salvar_hub(df, key):
             pass
 
 
+def salvar_arquivo_no_duckdb(uploaded_file):
+    """
+    Lê o arquivo enviado, salva direto no DuckDB e retorna (df, n_linhas, erro).
+    Suporta xlsx, xls, csv e parquet. Sem merge — substitui completamente.
+    """
+    nome = uploaded_file.name.lower()
+    try:
+        raw_bytes = uploaded_file.getvalue()
+        if nome.endswith(".parquet"):
+            df = pd.read_parquet(io.BytesIO(raw_bytes))
+        elif nome.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw_bytes))
+        elif nome.endswith(".csv"):
+            sep = _detect_csv_sep(uploaded_file)
+            df = pd.read_csv(io.BytesIO(raw_bytes), sep=sep, low_memory=False)
+        else:
+            return None, 0, f"Formato não suportado: {uploaded_file.name}"
+    except Exception as e:
+        return None, 0, str(e)
+
+    if df.empty:
+        return None, 0, "Arquivo sem dados"
+
+    # Normaliza nomes de colunas
+    df, _, _ = preprocess_df(df)
+
+    # Salva no DuckDB
+    con = _open_hub_db()
+    if con is not None:
+        try:
+            con.execute("CREATE TABLE IF NOT EXISTS hub_meta (k VARCHAR, v VARCHAR)")
+            con.execute("DELETE FROM hub_meta WHERE k='hub_key'")
+            _key = suggest_key_column(df)
+            con.execute("INSERT INTO hub_meta VALUES ('hub_key', ?)", [_key])
+            con.register("_upload_tmp", df)
+            con.execute(f"CREATE OR REPLACE TABLE {HUB_DB_TABLE} AS SELECT * FROM _upload_tmp")
+            con.unregister("_upload_tmp")
+        except Exception as _e:
+            print(f"[ML_INSIGHTS] Erro ao salvar no DuckDB: {_e}", flush=True)
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    # Fallback parquet local
+    try:
+        df.to_parquet(HUB_FILE, index=False)
+    except Exception:
+        pass
+
+    return df, len(df), None
+
+
 def carregar_hub():
     df = pd.DataFrame()
     key = "id_cliente"
@@ -1087,7 +1141,7 @@ _can_analyze = (bool(uploaded_files) or _has_hub) and _cfg_has_columns
 rodar = st.session_state.pop("auto_run_ml", False)
 
 _click_atualizar = st.sidebar.button(
-    "▶ Atualizar Dashboard",
+    "▶ Rodar Machine Learning",
     type="primary",
     width='stretch',
     disabled=not _can_analyze,
@@ -1100,145 +1154,31 @@ if not _can_analyze:
 elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
-# ── Auto-disparo: processa automaticamente ao detectar arquivo novo ──
+# ── Upload automático: detecta arquivo novo → salva direto no DuckDB ──
 _novo_upload = (
     bool(uploaded_files)
     and bool(current_upload_hash)
     and current_upload_hash != st.session_state.get("last_processed_hash", "")
 )
-_auto_processar_upload = _novo_upload and not _click_atualizar
-analisar_tudo = _click_atualizar or _auto_processar_upload
 
-# ── Lógica do botão ───────────────────────────────────────────
-if analisar_tudo and uploaded_files:
-    st.session_state.upload_attempted = True
-    _upload_error_main = None
-    with st.spinner("⏳ Carregando e processando dados..."):
-      try:
-        hub = st.session_state.hub_df.copy()
-        rows_ingested = 0
-        base_total_rows = int(st.session_state.get("hub_total_rows") or len(hub))
-        processed_count = 0
-        ignored_count = 0
-        for f in uploaded_files:
-            try:
-                # ── Parquet: caminho mais eficiente, sem chunking necessário ──
-                if f.name.lower().endswith(".parquet"):
-                    _pq_bytes = f.getvalue()
-                    raw = pd.read_parquet(io.BytesIO(_pq_bytes))
-                    del _pq_bytes
-                    if len(raw) > MAX_DASHBOARD_ROWS:
-                        raw = raw.sample(MAX_DASHBOARD_ROWS, random_state=42).reset_index(drop=True)
-                    clean, _, _ = preprocess_df(raw)
-                    del raw
-                    if clean.empty:
-                        ignored_count += 1
-                        continue
-                    rows_ingested += len(clean)
-                    hub, used_key = merge_clean_into_hub_sampled(hub, clean, key_col, MAX_DASHBOARD_ROWS)
-                    if used_key:
-                        st.session_state.hub_key = used_key
-                    processed_count += 1
-                    continue
+if _novo_upload:
+    with st.spinner(f"⏳ Salvando {uploaded_files[0].name} no banco de dados..."):
+        _df_novo, _n_linhas, _erro = salvar_arquivo_no_duckdb(uploaded_files[0])
 
-                if large_mode and f.name.lower().endswith(".csv"):
-                    file_had_rows = False
-                    for chunk in iter_uploaded_csv_chunks(f):
-                        clean, _, _ = preprocess_df(chunk)
-                        if clean.empty:
-                            continue
-                        file_had_rows = True
-                        rows_ingested += len(clean)
-                        hub, used_key = merge_clean_into_hub_sampled(
-                            hub,
-                            clean,
-                            key_col,
-                            MAX_DASHBOARD_ROWS,
-                        )
-                        if used_key:
-                            st.session_state.hub_key = used_key
-                    if file_had_rows:
-                        processed_count += 1
-                    else:
-                        ignored_count += 1
-                    continue
-
-                # Excel (grande ou pequeno) e CSV pequeno: leitura direta
-                if f.name.lower().endswith((".xlsx", ".xls")):
-                    try:
-                        _xl_bytes = io.BytesIO(f.getvalue())
-                        raw = pd.read_excel(_xl_bytes, dtype=str)
-                        _xl_bytes.close()
-                        # Converte strings numéricas para números
-                        for _col in raw.columns:
-                            raw[_col] = coerce_numeric_series(raw[_col])
-                        if len(raw) > MAX_DASHBOARD_ROWS:
-                            raw = raw.sample(MAX_DASHBOARD_ROWS, random_state=42).reset_index(drop=True)
-                    except Exception as _xl_err:
-                        st.error(f"❌ {f.name}: falha ao ler Excel — {_xl_err}")
-                        ignored_count += 1
-                        continue
-                else:
-                    raw = read_uploaded_file(f)
-
-                clean, _, _ = preprocess_df(raw)
-                if clean.empty:
-                    ignored_count += 1
-                    continue
-
-                rows_ingested += len(clean)
-                hub, used_key = merge_clean_into_hub(hub, clean, key_col)
-                if used_key:
-                    st.session_state.hub_key = used_key
-
-                processed_count += 1
-            except MemoryError:
-                st.sidebar.error(
-                    f"❌ {f.name}: arquivo muito grande para a memória disponível. "
-                    "Converta para CSV e tente novamente."
-                )
-            except Exception as _e:
-                st.sidebar.error(f"❌ Erro ao processar {f.name}: {_e}")
-                import traceback as _tb
-                print(f"[ML_INSIGHTS] Erro em {f.name}:", _tb.format_exc(), flush=True)
-
-        rows_after = len(hub)
-        st.session_state.hub_df = hub
-        if large_mode:
-            st.session_state.hub_total_rows = base_total_rows + rows_ingested
-        else:
-            st.session_state.hub_total_rows = rows_after
-        st.session_state.large_mode_active = large_mode
+    if _erro:
+        st.error(f"❌ Falha ao salvar arquivo: {_erro}")
+    elif _df_novo is None or _n_linhas == 0:
+        st.error("❌ Arquivo sem dados válidos.")
+    else:
+        st.session_state.hub_df = _df_novo
+        st.session_state.hub_key = suggest_key_column(_df_novo)
+        st.session_state.hub_total_rows = _n_linhas
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        salvar_hub(hub, st.session_state.get("hub_key", key_col))
-      except Exception as _upload_main_exc:
-        _upload_error_main = _upload_main_exc
-        import traceback as _tb2
-        print(f"[ML_INSIGHTS] Erro crítico no upload:", _tb2.format_exc(), flush=True)
-        st.session_state.last_processed_hash = current_upload_hash  # evita loop
-
-    if _upload_error_main is not None:
-        st.error(f"❌ Erro ao processar o arquivo: `{_upload_error_main}`\n\nDetalhes no log do app.")
-    elif processed_count == 0 or rows_after == 0:
-        st.sidebar.error(
-            "Nenhum registro válido foi consolidado. "
-            "Abra as Configurações avançadas e ajuste a chave única."
-        )
-        rodar = False
-    else:
-        st.session_state.auto_run_ml = _click_atualizar
-        if large_mode:
-            st.sidebar.success(
-                f"✅ Dashboard atualizado. Total processado: {st.session_state.hub_total_rows:,} | "
-                f"Amostra em memória: {rows_after:,}."
-            )
-        else:
-            st.sidebar.success(f"✅ Dashboard atualizado com {rows_after:,} registros.")
-        if _auto_processar_upload:
-            st.sidebar.caption("Dados carregados. Clique em 'Atualizar Dashboard' quando quiser rodar o Machine Learning.")
+        st.sidebar.success(f"✅ {_n_linhas:,} registros carregados do arquivo.")
         st.rerun()
-elif analisar_tudo and _has_hub:
+
+if _click_atualizar and _has_hub:
     rodar = True
 
 if st.sidebar.button("🗑 Limpar Hub", width='stretch'):
