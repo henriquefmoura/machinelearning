@@ -215,9 +215,11 @@ LARGE_FILE_THRESHOLD_MB = 100
 MAX_DASHBOARD_ROWS = 200_000
 
 
-@st.cache_resource
 def _get_md_token():
-    """Retorna o token do MotherDuck, lendo secrets uma única vez."""
+    """Retorna token do MotherDuck com prioridade: runtime > secrets > env."""
+    runtime_token = st.session_state.get("motherduck_token_runtime", "")
+    if runtime_token:
+        return runtime_token
     try:
         return st.secrets.get("MOTHERDUCK_TOKEN", os.environ.get("MOTHERDUCK_TOKEN", ""))
     except Exception:
@@ -968,6 +970,21 @@ if IS_CLOUD and str(HUB_DB_PATH) == "dados.duckdb":
     )
 else:
     st.sidebar.caption(f"Banco conectado: {HUB_DB_PATH}")
+
+if str(HUB_DB_PATH).startswith("md:") and not _get_md_token():
+    st.sidebar.warning(
+        "MotherDuck sem token. Cole o token abaixo para conectar sem usar Secrets.",
+        icon="🔑",
+    )
+    _md_runtime_token = st.sidebar.text_input(
+        "Token MotherDuck (temporario)",
+        type="password",
+        key="motherduck_token_runtime",
+        help="Fica apenas na sessao atual do app.",
+    )
+    if _md_runtime_token:
+        st.sidebar.success("Token informado. Clique em '🔄 Recarregar do banco'.")
+
 st.sidebar.markdown("---")
 
 # ── Upload ────────────────────────────────────────────────────
