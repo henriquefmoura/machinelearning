@@ -18,9 +18,8 @@ import csv
 import hashlib
 from datetime import datetime
 
-# Log de diagnóstico — imprime uma única vez por processo (variável de ambiente persiste no processo)
-if not os.environ.get("_ML_INSIGHTS_STARTED"):
-    os.environ["_ML_INSIGHTS_STARTED"] = "1"
+# Log de diagnóstico opcional (evita spam em loops de restart no Cloud)
+if os.environ.get("ML_INSIGHTS_DEBUG", "0") == "1":
     print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
 
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -985,7 +984,6 @@ with st.sidebar.expander("☁️ Conectar MotherDuck", expanded=True):
     st.text_input(
         "Database path",
         key="hub_db_path_runtime",
-        value=st.session_state.get("hub_db_path_runtime", ""),
         placeholder="md:machinelearning",
         help="Opcional. Se preencher, substitui HUB_DB_PATH dos Secrets nesta sessao.",
     )
