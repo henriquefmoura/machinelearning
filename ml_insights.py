@@ -1,3 +1,4 @@
+import os
 import sys
 import traceback as _traceback
 
@@ -17,8 +18,10 @@ import csv
 import hashlib
 from datetime import datetime
 
-# Log de diagnóstico — aparece em Streamlit Cloud > Manage app > Logs
-print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
+# Log de diagnóstico — imprime uma única vez por processo (variável de ambiente persiste no processo)
+if not os.environ.get("_ML_INSIGHTS_STARTED"):
+    os.environ["_ML_INSIGHTS_STARTED"] = "1"
+    print(f"[ML_INSIGHTS] Python {sys.version} | numpy {np.__version__} | pandas {pd.__version__}", flush=True)
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
