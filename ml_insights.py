@@ -226,20 +226,29 @@ def _get_md_token():
         return os.environ.get("MOTHERDUCK_TOKEN", "")
 
 
+def _get_hub_db_path():
+    """Retorna o caminho do banco com prioridade: runtime > config padrão."""
+    runtime_path = st.session_state.get("hub_db_path_runtime", "").strip()
+    if runtime_path:
+        return runtime_path
+    return HUB_DB_PATH
+
+
 def _open_hub_db():
     """Abre conexão DuckDB (local ou MotherDuck). Cada chamada abre uma nova conexão — seguro para threads."""
     if not _DUCKDB_OK:
         return None
+    effective_db_path = _get_hub_db_path()
     try:
-        if str(HUB_DB_PATH).startswith("md:"):
+        if str(effective_db_path).startswith("md:"):
             md_token = _get_md_token()
             if not md_token:
                 print("[ML_INSIGHTS] MOTHERDUCK_TOKEN não configurado. Defina nos Secrets do Streamlit Cloud.", flush=True)
                 return None
-            return _duckdb.connect(HUB_DB_PATH, config={"motherduck_token": md_token})
-        return _duckdb.connect(HUB_DB_PATH)
+            return _duckdb.connect(effective_db_path, config={"motherduck_token": md_token})
+        return _duckdb.connect(effective_db_path)
     except Exception as _db_exc:
-        print(f"[ML_INSIGHTS] Falha ao abrir banco do hub ({HUB_DB_PATH}): {_db_exc}", flush=True)
+        print(f"[ML_INSIGHTS] Falha ao abrir banco do hub ({effective_db_path}): {_db_exc}", flush=True)
         return None
 
 
@@ -963,27 +972,33 @@ if "hub_df" not in st.session_state:
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.markdown("## 📊 ML Insights Hub")
 st.sidebar.caption(f"Build: {APP_SCHEMA_VERSION}")
-if IS_CLOUD and str(HUB_DB_PATH) == "dados.duckdb":
+_effective_hub_db_path = _get_hub_db_path()
+if IS_CLOUD and str(_effective_hub_db_path) == "dados.duckdb":
     st.sidebar.warning(
         "Persistência limitada: configure HUB_DB_PATH (ex: md:seu_db) para manter dados após reinícios do app.",
         icon="⚠️",
     )
 else:
-    st.sidebar.caption(f"Banco conectado: {HUB_DB_PATH}")
+    st.sidebar.caption(f"Banco conectado: {_effective_hub_db_path}")
 
-if str(HUB_DB_PATH).startswith("md:") and not _get_md_token():
-    st.sidebar.warning(
-        "MotherDuck sem token. Cole o token abaixo para conectar sem usar Secrets.",
-        icon="🔑",
+with st.sidebar.expander("☁️ Conectar MotherDuck", expanded=True):
+    st.text_input(
+        "Database path",
+        key="hub_db_path_runtime",
+        value=st.session_state.get("hub_db_path_runtime", ""),
+        placeholder="md:machinelearning",
+        help="Opcional. Se preencher, substitui HUB_DB_PATH dos Secrets nesta sessao.",
     )
-    _md_runtime_token = st.sidebar.text_input(
+    _md_runtime_token = st.text_input(
         "Token MotherDuck (temporario)",
         type="password",
         key="motherduck_token_runtime",
-        help="Fica apenas na sessao atual do app.",
+        help="Opcional. Fica apenas na sessao atual do app.",
     )
-    if _md_runtime_token:
-        st.sidebar.success("Token informado. Clique em '🔄 Recarregar do banco'.")
+    if (_get_hub_db_path().startswith("md:")) and (not _get_md_token()):
+        st.warning("Informe o token para conectar em md:...", icon="🔑")
+    elif _md_runtime_token:
+        st.success("Token informado para esta sessao.")
 
 st.sidebar.markdown("---")
 
@@ -1189,9 +1204,9 @@ elif _has_hub and not uploaded_files:
     st.sidebar.caption(f"Hub ativo: {len(st.session_state.hub_df):,} registros")
 
 # ── Indicador de conexão MotherDuck ──────────────────────────
-_is_motherduck = str(HUB_DB_PATH).startswith("md:")
+_is_motherduck = str(_get_hub_db_path()).startswith("md:")
 if _is_motherduck:
-    st.sidebar.caption(f"☁️ MotherDuck: `{HUB_DB_PATH}`")
+    st.sidebar.caption(f"☁️ MotherDuck: `{_get_hub_db_path()}`")
 elif not _has_hub:
     st.sidebar.caption("💾 Banco local")
 
