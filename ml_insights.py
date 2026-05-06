@@ -346,6 +346,7 @@ def carregar_hub():
     """
     df = pd.DataFrame()
     key = "id_cliente"
+    total_rows = 0
 
     con = _open_hub_db()
     if con is not None:
@@ -355,7 +356,13 @@ def carregar_hub():
                 [HUB_DB_TABLE],
             ).fetchone()[0]
             if _tbl:
-                df = con.execute(f"SELECT * FROM {HUB_DB_TABLE}").df()
+                total_rows = int(con.execute(f"SELECT COUNT(*) FROM {HUB_DB_TABLE}").fetchone()[0])
+                if total_rows > MAX_DASHBOARD_ROWS:
+                    df = con.execute(
+                        f"SELECT * FROM {HUB_DB_TABLE} LIMIT {MAX_DASHBOARD_ROWS}"
+                    ).df()
+                else:
+                    df = con.execute(f"SELECT * FROM {HUB_DB_TABLE}").df()
 
             _meta = con.execute("SELECT v FROM hub_meta WHERE k='hub_key' LIMIT 1").fetchone()
             if _meta and _meta[0]:
@@ -369,7 +376,7 @@ def carregar_hub():
                 pass
 
     if not df.empty:
-        return df, key
+        return df, key, (total_rows or len(df))
 
     if HUB_FILE.exists():
         try:
@@ -378,7 +385,7 @@ def carregar_hub():
             df = pd.DataFrame()
     if HUB_KEY_FILE.exists():
         key = HUB_KEY_FILE.read_text().strip()
-    return df, key
+    return df, key, len(df)
 
 
 def hub_para_bytes(df):
@@ -961,12 +968,12 @@ if st.session_state.get("app_schema_version") != APP_SCHEMA_VERSION:
 
 # ── Carrega dados persistidos do disco quando a sessão começa ─
 if "hub_df" not in st.session_state:
-    _disk_hub, _disk_key = carregar_hub()
+    _disk_hub, _disk_key, _disk_total = carregar_hub()
     st.session_state.hub_df = _disk_hub
     st.session_state.hub_key = st.session_state.get("hub_key", _disk_key)
-    st.session_state.hub_total_rows = len(_disk_hub)
+    st.session_state.hub_total_rows = int(_disk_total)
     if not _disk_hub.empty:
-        st.session_state.last_update_at = "recuperado do disco"
+        st.session_state.last_update_at = "recuperado do banco"
 
 # ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.markdown("## 📊 ML Insights Hub")
