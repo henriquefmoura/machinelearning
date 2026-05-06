@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import traceback as _traceback
 
 import streamlit as st
@@ -404,6 +405,16 @@ def hub_para_bytes(df):
     return buf.read()
 
 
+def safe_rerun(min_interval_sec=1.2):
+    """Evita cascata de reruns muito próximos, que pode quebrar websocket em produção."""
+    now = time.time()
+    last = float(st.session_state.get("_last_rerun_ts", 0.0) or 0.0)
+    if (now - last) < min_interval_sec:
+        return
+    st.session_state["_last_rerun_ts"] = now
+    st.rerun()
+
+
 
 def require_authentication():
     if st.session_state.get("auth_ok", False):
@@ -428,7 +439,7 @@ def require_authentication():
             if st.button("Acessar Dashboard", type="primary", width='stretch'):
                 if hmac.compare_digest(senha, APP_PASSWORD):
                     st.session_state.auth_ok = True
-                    st.rerun()
+                    safe_rerun()
                 else:
                     st.error("❌ Senha incorreta. Tente novamente.")
         st.caption("Senha padrão: mlhub123 | Personalize em Settings > Secrets no Streamlit Cloud.")
@@ -454,7 +465,7 @@ with col_sair:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Sair", width='stretch'):
         st.session_state.auth_ok = False
-        st.rerun()
+        safe_rerun()
 st.divider()
 
 
@@ -1234,7 +1245,7 @@ if _has_hub:
     if st.sidebar.button("🔄 Recarregar do banco", width='stretch'):
         carregar_hub.clear()
         st.session_state.hub_df = pd.DataFrame()
-        st.rerun()
+        safe_rerun()
 
 # ── Upload automático: detecta arquivo novo → salva direto no DuckDB ──
 _novo_upload = (
@@ -1260,7 +1271,7 @@ if _novo_upload:
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         st.sidebar.success(f"✅ {_n_linhas:,} registros carregados do arquivo.")
-        st.rerun()
+        safe_rerun()
 
 if _click_atualizar and _has_hub:
     rodar = True
@@ -1292,10 +1303,10 @@ if st.session_state.confirm_limpar:
         st.session_state.hub_source = "desconhecida"
         carregar_hub.clear()  # invalida cache após limpar
         st.session_state.confirm_limpar = False
-        st.rerun()
+        safe_rerun()
     if _cn.button("Cancelar", width='stretch', key="confirm_no"):
         st.session_state.confirm_limpar = False
-        st.rerun()
+        safe_rerun()
 
 
 
@@ -1576,7 +1587,7 @@ with tab_mapa:
                 with st.spinner(f"Geocodificando {len(_ceps_to_geo)} CEPs…"):
                     _geo_result = geocode_ceps(_ceps_to_geo)
                 st.session_state["_geo_cep_cache"] = _geo_result
-                st.rerun()
+                safe_rerun()
 
             if st.session_state.get("_geo_cep_cache"):
                 _geo = st.session_state["_geo_cep_cache"]
@@ -1648,7 +1659,7 @@ with tab_mapa:
                 st.session_state["_geo_man_cache"] = {
                     "geo": _geo_m, "cep_col": _sel_cep, "rua_col": _sel_rua
                 }
-                st.rerun()
+                safe_rerun()
 
             if st.session_state.get("_geo_man_cache"):
                 _mc_data = st.session_state["_geo_man_cache"]
