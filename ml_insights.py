@@ -347,6 +347,9 @@ def carregar_hub():
     df = pd.DataFrame()
     key = "id_cliente"
     total_rows = 0
+    source = "local"
+    effective_db_path = _get_hub_db_path()
+    md_mode = str(effective_db_path).startswith("md:")
 
     con = _open_hub_db()
     if con is not None:
@@ -363,6 +366,7 @@ def carregar_hub():
                     ).df()
                 else:
                     df = con.execute(f"SELECT * FROM {HUB_DB_TABLE}").df()
+                source = "motherduck" if md_mode else "duckdb-local"
 
             _meta = con.execute("SELECT v FROM hub_meta WHERE k='hub_key' LIMIT 1").fetchone()
             if _meta and _meta[0]:
@@ -376,7 +380,12 @@ def carregar_hub():
                 pass
 
     if not df.empty:
-        return df, key, (total_rows or len(df))
+        return df, key, (total_rows or len(df)), source
+
+    # Em modo cloud (md:), não faz fallback para parquet local.
+    # Isso garante que o que aparece no app veio realmente da nuvem.
+    if md_mode:
+        return pd.DataFrame(), key, 0, "cloud-unavailable"
 
     if HUB_FILE.exists():
         try:
@@ -385,7 +394,7 @@ def carregar_hub():
             df = pd.DataFrame()
     if HUB_KEY_FILE.exists():
         key = HUB_KEY_FILE.read_text().strip()
-    return df, key, len(df)
+    return df, key, len(df), "local-parquet"
 
 
 def hub_para_bytes(df):
@@ -952,6 +961,8 @@ if "hub_total_rows" not in st.session_state:
     st.session_state.hub_total_rows = 0
 if "large_mode_active" not in st.session_state:
     st.session_state.large_mode_active = False
+if "hub_source" not in st.session_state:
+    st.session_state.hub_source = "desconhecida"
 if st.session_state.get("app_schema_version") != APP_SCHEMA_VERSION:
     if HUB_FILE.exists():
         HUB_FILE.unlink()
@@ -964,14 +975,16 @@ if st.session_state.get("app_schema_version") != APP_SCHEMA_VERSION:
     st.session_state.last_update_at = "-"
     st.session_state.hub_total_rows = 0
     st.session_state.large_mode_active = False
+    st.session_state.hub_source = "desconhecida"
     st.session_state.app_schema_version = APP_SCHEMA_VERSION
 
 # ── Carrega dados persistidos do disco quando a sessão começa ─
 if "hub_df" not in st.session_state:
-    _disk_hub, _disk_key, _disk_total = carregar_hub()
+    _disk_hub, _disk_key, _disk_total, _disk_source = carregar_hub()
     st.session_state.hub_df = _disk_hub
     st.session_state.hub_key = st.session_state.get("hub_key", _disk_key)
     st.session_state.hub_total_rows = int(_disk_total)
+    st.session_state.hub_source = _disk_source
     if not _disk_hub.empty:
         st.session_state.last_update_at = "recuperado do banco"
 
@@ -986,6 +999,7 @@ if IS_CLOUD and str(_effective_hub_db_path) == "dados.duckdb":
     )
 else:
     st.sidebar.caption(f"Banco conectado: {_effective_hub_db_path}")
+st.sidebar.caption(f"Fonte dos dados: {st.session_state.get('hub_source', 'desconhecida')}")
 
 with st.sidebar.expander("☁️ Conectar MotherDuck", expanded=True):
     st.text_input(
@@ -1242,6 +1256,7 @@ if _novo_upload:
         st.session_state.hub_df = _df_novo
         st.session_state.hub_key = suggest_key_column(_df_novo)
         st.session_state.hub_total_rows = _n_linhas
+        st.session_state.hub_source = "motherduck" if _get_hub_db_path().startswith("md:") else "duckdb-local"
         st.session_state.last_processed_hash = current_upload_hash
         st.session_state.last_update_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         st.sidebar.success(f"✅ {_n_linhas:,} registros carregados do arquivo.")
@@ -1274,6 +1289,7 @@ if st.session_state.confirm_limpar:
                     _db_con.close()
                 except Exception:
                     pass
+        st.session_state.hub_source = "desconhecida"
         carregar_hub.clear()  # invalida cache após limpar
         st.session_state.confirm_limpar = False
         st.rerun()
